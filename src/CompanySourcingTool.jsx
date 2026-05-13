@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import * as XLSX from "xlsx";
 
 const VERTICALS = [
@@ -25,7 +25,30 @@ const SOFTWARE_PRODUCTS = {
   "Business Intelligence & Reporting": { icon:"▦", description:"Dashboards, KPIs, analytics, data integration, operational reporting", filters:{ "Capabilities":["Custom Dashboards","KPI Tracking","Data Integration","Predictive Analytics","Scheduled Reports"], "Industry Fit":["Mining","Contractor","Logistics","Manufacturing","Multi-site Ops"], "Deployment":["Cloud (SaaS)","On-Premise","Hybrid"], "Integrations":["ERP Connector","API-First","Data Warehouse","Native Connectors"] } },
 };
 
-const OWNERSHIP_TYPES = ["Any Ownership","Founder-Owned","VC-Backed","Private Equity","Acquired","Publicly Traded","Family-Owned","Employee-Owned (ESOP)"];
+const OWNERSHIP_TYPES = [
+  "Any Ownership",
+  "Founder-Operated",
+  "Vintage PE",
+  "Recent PE",
+  "Unknown",
+  "VC-Backed",
+  "Private Equity",
+  "Acquired",
+  "Publicly Traded",
+  "Family-Owned",
+  "Employee-Owned (ESOP)",
+];
+
+function inFoundedEra(year, label) {
+  if (label === "Any Era" || year == null || Number.isNaN(Number(year))) return true;
+  const y = Number(year);
+  if (label === "2020–Present") return y >= 2020;
+  if (label === "2015–2019") return y >= 2015 && y <= 2019;
+  if (label === "2010–2014") return y >= 2010 && y <= 2014;
+  if (label === "2000–2009") return y >= 2000 && y <= 2009;
+  if (label === "Before 2000") return y < 2000;
+  return true;
+}
 const REVENUE_RANGES = ["Any Revenue","< $1M","$1M–$5M","$5M–$20M","$20M–$50M","$50M–$200M","$200M+"];
 const EMPLOYEE_RANGES = ["Any Size","1–10","11–50","51–200","201–500","501–1,000","1,000+"];
 const FOUNDED_RANGES = ["Any Era","2020–Present","2015–2019","2010–2014","2000–2009","Before 2000"];
@@ -42,172 +65,321 @@ export default function CompanySourcingTool() {
   const [sizeFilter, setSizeFilter] = useState("Any Size");
   const [foundedFilter, setFoundedFilter] = useState("Any Era");
   const [searchQuery, setSearchQuery] = useState("");
-  const [savedCompanies, setSavedCompanies] = useState([]);
-  const [companyMeta, setCompanyMeta] = useState({});
+  const [companyMeta, setCompanyMeta] = useState(() => {
+    try {
+      return JSON.parse(typeof localStorage !== "undefined" ? localStorage.getItem("sourcingCompanyMeta") || "{}" : "{}");
+    } catch {
+      return {};
+    }
+  });
   const [activeTab, setActiveTab] = useState("discover");
   const [sidebarSection, setSidebarSection] = useState("product");
   const [exportFlash, setExportFlash] = useState(false);
 
-  // AI search state
-  const [searchResults, setSearchResults] = useState([]); // array of company objects from AI
+  const [searchResults, setSearchResults] = useState([]);
+  const [savedRows, setSavedRows] = useState([]);
+  const [universeRows, setUniverseRows] = useState([]);
+  const [universeTotal, setUniverseTotal] = useState(0);
   const [searching, setSearching] = useState(false);
   const [searchDone, setSearchDone] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [searchLog, setSearchLog] = useState(""); // streaming status messages
+  const [searchLog, setSearchLog] = useState("");
   const [expandedCompany, setExpandedCompany] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [llmProvider, setLlmProvider] = useState(() => localStorage.getItem("sourcingLlmProvider") || "none");
+  const [apiStatus, setApiStatus] = useState({});
+  const [thesisRequireMissionCritical, setThesisRequireMissionCritical] = useState(false);
+  const [thesisRequireVertIntegrated, setThesisRequireVertIntegrated] = useState(false);
+  const [thesisRequireProprietary, setThesisRequireProprietary] = useState(false);
+  const [thesisRequireFounderVintage, setThesisRequireFounderVintage] = useState(false);
+  const [minOwnershipConfidence, setMinOwnershipConfidence] = useState(0);
+
+  useEffect(() => {
+    localStorage.setItem("sourcingCompanyMeta", JSON.stringify(companyMeta));
+  }, [companyMeta]);
+
+  useEffect(() => {
+    localStorage.setItem("sourcingLlmProvider", llmProvider);
+  }, [llmProvider]);
+
+  const refreshApiStatus = useCallback(() => {
+    fetch("/api/settings-status")
+      .then((r) => r.json())
+      .then(setApiStatus)
+      .catch(() => setApiStatus({}));
+  }, []);
+
+  useEffect(() => {
+    refreshApiStatus();
+  }, [refreshApiStatus, settingsOpen]);
+
+  const loadSavedRows = useCallback(() => {
+    fetch("/api/universe?savedOnly=1&limit=500")
+      .then((r) => r.json())
+      .then((d) => setSavedRows(d.companies || []))
+      .catch(() => setSavedRows([]));
+  }, []);
+
+  const loadUniverseRows = useCallback(() => {
+    fetch("/api/universe?limit=200")
+      .then((r) => r.json())
+      .then((d) => {
+        setUniverseRows(d.companies || []);
+        setUniverseTotal(d.total || 0);
+      })
+      .catch(() => {
+        setUniverseRows([]);
+        setUniverseTotal(0);
+      });
+  }, []);
+
+  useEffect(() => {
+    loadSavedRows();
+  }, [loadSavedRows]);
+
+  useEffect(() => {
+    if (activeTab === "universe") loadUniverseRows();
+  }, [activeTab, loadUniverseRows]);
 
   const toggleTag = (group, tag) => setSelectedTags(prev => { const c=prev[group]||[]; return {...prev,[group]:c.includes(tag)?c.filter(t=>t!==tag):[...c,tag]}; });
   const toggleVertical = v => setSelectedVerticals(prev => prev.includes(v)?prev.filter(x=>x!==v):[...prev,v]);
   const allSelectedTags = Object.values(selectedTags).flat();
-  const saveCompany = id => { setSavedCompanies(prev=>[...prev,id]); setCompanyMeta(prev=>({...prev,[id]:defaultMeta()})); };
-  const unsaveCompany = id => setSavedCompanies(prev=>prev.filter(x=>x!==id));
+
   const updateMeta = (id,field,val) => setCompanyMeta(prev=>({...prev,[id]:{...(prev[id]||defaultMeta()),[field]:val}}));
 
-  const activeFilterCount = allSelectedTags.length + selectedVerticals.length +
-    (ownershipFilter!=="Any Ownership"?1:0) + (revenueFilter!=="Any Revenue"?1:0) +
-    (sizeFilter!=="Any Size"?1:0) + (foundedFilter!=="Any Era"?1:0);
+  const saveCompany = async (id, saved) => {
+    try {
+      const r = await fetch(`/api/companies/${id}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ saved }),
+      });
+      const updated = await r.json();
+      setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+      if (saved && !companyMeta[id]) setCompanyMeta((p) => ({ ...p, [id]: defaultMeta() }));
+      if (!saved) setCompanyMeta((p) => {
+        const n = { ...p };
+        delete n[id];
+        return n;
+      });
+      loadSavedRows();
+      loadUniverseRows();
+    } catch {
+      /* ignore */
+    }
+  };
 
-  const clearAll = () => { setSelectedTags({}); setSelectedVerticals([]); setOwnershipFilter("Any Ownership"); setRevenueFilter("Any Revenue"); setSizeFilter("Any Size"); setFoundedFilter("Any Era"); };
+  const patchClassify = async (id, body) => {
+    try {
+      const r = await fetch(`/api/companies/${id}/classify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const updated = await r.json();
+      setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+      loadSavedRows();
+      loadUniverseRows();
+    } catch {
+      /* ignore */
+    }
+  };
 
-  const savedList = searchResults.filter(c => savedCompanies.includes(c.id));
+  const thesisFilterCount =
+    (thesisRequireMissionCritical ? 1 : 0) +
+    (thesisRequireVertIntegrated ? 1 : 0) +
+    (thesisRequireProprietary ? 1 : 0) +
+    (thesisRequireFounderVintage ? 1 : 0) +
+    (minOwnershipConfidence > 0 ? 1 : 0);
 
-  // ── AI-powered company search ──
-  const runSearch = async () => {
+  const activeFilterCount =
+    allSelectedTags.length +
+    selectedVerticals.length +
+    (ownershipFilter !== "Any Ownership" ? 1 : 0) +
+    (revenueFilter !== "Any Revenue" ? 1 : 0) +
+    (sizeFilter !== "Any Size" ? 1 : 0) +
+    (foundedFilter !== "Any Era" ? 1 : 0) +
+    thesisFilterCount;
+
+  const clearAll = () => {
+    setSelectedTags({});
+    setSelectedVerticals([]);
+    setOwnershipFilter("Any Ownership");
+    setRevenueFilter("Any Revenue");
+    setSizeFilter("Any Size");
+    setFoundedFilter("Any Era");
+    setThesisRequireMissionCritical(false);
+    setThesisRequireVertIntegrated(false);
+    setThesisRequireProprietary(false);
+    setThesisRequireFounderVintage(false);
+    setMinOwnershipConfidence(0);
+  };
+
+  const runSearch = async (findMore = false) => {
     setSearching(true);
     setSearchDone(false);
     setSearchError("");
-    setSearchResults([]);
-    setSearchLog("Preparing search criteria…");
-
-    const verticalContext = selectedVerticals.length ? selectedVerticals.join(", ") : "any industrial vertical";
-    const tagContext = allSelectedTags.length ? allSelectedTags.join(", ") : "no specific feature filters";
-    const ownerCtx = ownershipFilter !== "Any Ownership" ? ownershipFilter : "any ownership";
-    const revCtx = revenueFilter !== "Any Revenue" ? revenueFilter : "any revenue";
-    const sizeCtx = sizeFilter !== "Any Size" ? sizeFilter : "any size";
-    const foundedCtx = foundedFilter !== "Any Era" ? foundedFilter : "any era";
-
-    const systemPrompt = `You are an exhaustive B2B software market researcher. Your job is to find the MAXIMUM number of real, verifiable software companies that match a sourcing brief. Use your web_search tool aggressively — run at least 8-12 searches with varied queries to find as many companies as possible. Search for: company directories (G2, Capterra, Software Advice, GetApp, Gartner Peer Insights), industry blogs, market reports, niche forums, LinkedIn searches, news articles, and any other source. Do NOT stop after a few results. Keep searching until you have exhausted all angles.
-
-For each company found, return a JSON object. After ALL searches are complete, return ONLY a single JSON array (no markdown, no explanation, just the raw JSON array) of company objects. Each object must have these exact keys:
-{
-  "id": <unique integer>,
-  "name": <string>,
-  "website": <string, full URL>,
-  "country": <2-letter code, default "US">,
-  "foundedYear": <integer or null>,
-  "employees": <string range like "11–50" or null>,
-  "revenue": <string like "$1M–$5M" or null>,
-  "ownership": <one of: "Founder-Owned","VC-Backed","Private Equity","Acquired","Publicly Traded","Family-Owned","Employee-Owned (ESOP)" or null>,
-  "hq": <city, state/country string>,
-  "verticals": <array of strings from: Metals & Mining, Bulk Materials, Bulk Liquids, Forestry & Lumber, Structure Design & Analysis, Contractor Solutions, Equipment & Parts, Waste & Recycling, Safety & Compliance>,
-  "products": [<the software product type: "${activeProduct}">],
-  "tags": <array of relevant feature/capability strings>,
-  "description": <2-sentence description of what they do>,
-  "score": <integer 1-100 relevance score>
-}
-
-Aim for 20-40+ companies. Include both well-known vendors AND smaller niche players. Be thorough.`;
-
-    const userPrompt = `Find every software company you can that sells ${activeProduct} software, targeting these industrial verticals: ${verticalContext}.
-
-Additional filters to consider:
-- Feature tags: ${tagContext}
-- Ownership: ${ownerCtx}
-- Revenue range: ${revCtx}  
-- Company size: ${sizeCtx}
-- Founded: ${foundedCtx}
-
-Search exhaustively. Run many searches. Return as many real companies as possible as a raw JSON array.`;
-
+    if (!findMore) setSearchResults([]);
+    setSearchLog("Starting deterministic pipeline…");
     try {
-      setSearchLog("Scanning software directories, G2, Capterra, market reports…");
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const excludeDomains = findMore
+        ? searchResults.map((c) => c.domain).filter(Boolean)
+        : [];
+      const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 8000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }]
-        })
+          activeProduct,
+          selectedVerticals,
+          selectedTags: allSelectedTags,
+          ownershipFilter,
+          revenueFilter,
+          sizeFilter,
+          foundedFilter,
+          excludeDomains,
+          settings: { llmProvider },
+          thesis: {
+            requireMissionCritical: thesisRequireMissionCritical,
+            requireVerticallyIntegrated: thesisRequireVertIntegrated,
+            requireProprietary: thesisRequireProprietary,
+            requireFounderVintage: thesisRequireFounderVintage,
+            minOwnershipConfidence,
+          },
+        }),
       });
+      if (!res.ok) throw new Error(`Search HTTP ${res.status}`);
+      const { jobId } = await res.json();
+      if (!jobId) throw new Error("No jobId returned");
 
-      const data = await res.json();
+      await new Promise((r) => setTimeout(r, 80));
 
-      // Count how many web searches were run
-      const searchCalls = (data.content||[]).filter(b => b.type === "tool_use" && b.name === "web_search");
-      if (searchCalls.length > 0) {
-        setSearchLog(`Ran ${searchCalls.length} web searches — parsing results…`);
-      }
-
-      // Extract the final text block
-      const textBlock = (data.content||[]).filter(b => b.type === "text").map(b => b.text).join("\n");
-
-      // Parse JSON from the response
-      let companies = [];
-      // Try to find a JSON array in the response
-      const jsonMatch = textBlock.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
+      const es = new EventSource(`/api/search/${jobId}/stream`);
+      es.onmessage = (ev) => {
         try {
-          companies = JSON.parse(jsonMatch[0]);
-        } catch(e) {
-          // Try cleaning up common issues
-          const cleaned = jsonMatch[0].replace(/,\s*]/g, ']').replace(/,\s*}/g, '}');
-          try { companies = JSON.parse(cleaned); } catch(e2) {
-            setSearchError("Received results but couldn't parse them. Try searching again.");
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "log") setSearchLog(msg.message || "");
+          if (msg.type === "company" && msg.company) {
+            setSearchResults((prev) => {
+              const c = msg.company;
+              const i = prev.findIndex((x) => x.id === c.id);
+              if (i >= 0) {
+                const n = [...prev];
+                n[i] = { ...n[i], ...c };
+                return n;
+              }
+              return [...prev, c];
+            });
           }
+          if (msg.type === "error") {
+            setSearchError(msg.message || "Search error");
+            es.close();
+            setSearching(false);
+            setSearchDone(true);
+          }
+          if (msg.type === "done") {
+            es.close();
+            setSearching(false);
+            setSearchDone(true);
+            loadUniverseRows();
+            loadSavedRows();
+          }
+        } catch {
+          /* ignore malformed SSE */
         }
-      } else {
-        setSearchError("No structured results returned. Please try again.");
-      }
-
-      if (companies.length > 0) {
-        // Re-assign IDs to avoid collisions, ensure array fields
-        const cleaned = companies.map((c, i) => ({
-          ...c,
-          id: i + 1,
-          verticals: Array.isArray(c.verticals) ? c.verticals : [c.verticals].filter(Boolean),
-          products: Array.isArray(c.products) ? c.products : [activeProduct],
-          tags: Array.isArray(c.tags) ? c.tags : [],
-          score: typeof c.score === "number" ? c.score : 75,
-          foundedYear: c.foundedYear || null,
-        }));
-        setSearchResults(cleaned);
-        setSearchLog(`Found ${cleaned.length} companies`);
-      }
+      };
+      es.onerror = () => {
+        es.close();
+        setSearching(false);
+        setSearchDone(true);
+        setSearchError("Stream disconnected");
+      };
+    } catch (e) {
+      setSearchError(e.message || "Search failed");
+      setSearching(false);
       setSearchDone(true);
-    } catch(e) {
-      setSearchError("Search failed. Please try again.");
-      setSearchLog("");
     }
-    setSearching(false);
   };
 
   // ── Excel Export ──
-  const exportToExcel = () => {
-    if (!savedList.length) return;
-    const rows = savedList.map(c => {
+  const exportToExcel = async () => {
+    let rowsSrc = savedRows;
+    if (!rowsSrc.length) {
+      try {
+        const r = await fetch("/api/universe?savedOnly=1&limit=500");
+        const d = await r.json();
+        rowsSrc = d.companies || [];
+        setSavedRows(rowsSrc);
+      } catch {
+        rowsSrc = [];
+      }
+    }
+    if (!rowsSrc.length) return;
+    const rows = rowsSrc.map((c) => {
       const m = companyMeta[c.id] || defaultMeta();
+      const own = c.ownership_class || c.ownership || "";
       return {
-        "Website":        m.website || c.website || "",
-        "Company":        c.name,
-        "Vertical":       (c.verticals||[]).join(", "),
-        "Country":        c.country || "",
-        "Year Founded":   c.foundedYear || "",
-        "Employees":      c.employees || "",
-        "Quality":        m.quality !== "—" ? m.quality : "",
-        "Est. Revenue":   c.revenue || "",
-        "Overview":       c.description || "",
-        "Ownership":      c.ownership || "",
-        "Contact Name":   m.contactName,
-        "Role":           m.role,
-        "Email":          m.email,
-        "Comments":       m.comments,
+        Website: m.website || c.website || "",
+        Company: c.name,
+        Vertical: (c.verticals || []).join(", "),
+        Country: c.country || "",
+        "Year Founded": c.foundedYear || "",
+        Employees: c.employees || "",
+        Quality: m.quality !== "—" ? m.quality : "",
+        "Est. Revenue": c.revenue || "",
+        Overview: c.description || "",
+        Ownership: own,
+        "Thesis Score": c.score ?? c.thesisScore ?? "",
+        "Mission Critical (rule)": c.missionCriticalRule != null ? String(c.missionCriticalRule) : "",
+        "Mission Critical (LLM)": c.missionCriticalLLM != null ? String(c.missionCriticalLLM) : "",
+        "Mission Critical (manual)": c.manual_mission_critical || "",
+        "Vertically Integrated (rule)": c.verticallyIntegratedRule != null ? String(c.verticallyIntegratedRule) : "",
+        "Vertically Integrated (LLM)": c.verticallyIntegratedLLM != null ? String(c.verticallyIntegratedLLM) : "",
+        "Vertically Integrated (manual)": c.manual_vertically_integrated || "",
+        "Acquisition Year": (c.acquisitionHistory || []).map((a) => a.year).filter(Boolean).join("; ") || "",
+        Acquirer: (c.acquisitionHistory || []).map((a) => a.acquirer).filter(Boolean).join("; ") || "",
+        "Founder Still CEO": String(c.founderStillOperating ?? ""),
+        "Ownership Confidence": c.ownership_confidence ?? "",
+        "Classification Source": c.classificationSource || "",
+        "Sources Found Via": (c.sourceTags || []).join(" · "),
+        "Source URLs": (c.sources || []).join(" | "),
+        "Contact Name": m.contactName,
+        Role: m.role,
+        Email: m.email,
+        Comments: m.comments,
       };
     });
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{wch:35},{wch:25},{wch:28},{wch:8},{wch:13},{wch:12},{wch:10},{wch:14},{wch:55},{wch:22},{wch:20},{wch:18},{wch:28},{wch:40}];
+    ws["!cols"] = [
+      { wch: 35 },
+      { wch: 25 },
+      { wch: 28 },
+      { wch: 8 },
+      { wch: 13 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 14 },
+      { wch: 55 },
+      { wch: 22 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 14 },
+      { wch: 28 },
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 18 },
+      { wch: 40 },
+      { wch: 20 },
+      { wch: 18 },
+      { wch: 28 },
+      { wch: 40 },
+    ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sourcing");
     XLSX.writeFile(wb, "sourcing-file.xlsx");
@@ -216,17 +388,52 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
   };
 
   const prodData = SOFTWARE_PRODUCTS[activeProduct];
-  const ownerColor = {"VC-Backed":"#4af0c4","Private Equity":"#c44af0","Founder-Owned":"#f0c44a","Acquired":"#f08a4a","Family-Owned":"#4a8af0","Employee-Owned (ESOP)":"#f04a8a","Publicly Traded":"#8af04a"};
-  const qualityColor = {"Bronze":"#cd7f32","Silver":"#c0c0c0","Gold":"#ffd700","Platinum":"#e5e4e2"};
+  const ownerColor = {
+    "VC-Backed": "#4af0c4",
+    "Private Equity": "#c44af0",
+    "Founder-Owned": "#f0c44a",
+    "Founder-Operated": "#f0c44a",
+    "Vintage PE": "#c44af0",
+    "Recent PE": "#9a7af0",
+    Unknown: "#5a5a7a",
+    Acquired: "#f08a4a",
+    "Family-Owned": "#4a8af0",
+    "Employee-Owned (ESOP)": "#f04a8a",
+    "Publicly Traded": "#8af04a",
+  };
+  const qualityColor = { Bronze: "#cd7f32", Silver: "#c0c0c0", Gold: "#ffd700", Platinum: "#e5e4e2" };
 
-  // Apply any local filters to search results
-  const displayedResults = searchResults.filter(c => {
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      if (!c.name.toLowerCase().includes(q) && !(c.description||"").toLowerCase().includes(q) && !(c.verticals||[]).some(v=>v.toLowerCase().includes(q))) return false;
-    }
-    return true;
-  }).sort((a,b) => b.score - a.score);
+  const displayedResults = searchResults
+    .filter((c) => {
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        if (
+          !c.name.toLowerCase().includes(q) &&
+          !(c.description || "").toLowerCase().includes(q) &&
+          !(c.verticals || []).some((v) => v.toLowerCase().includes(q)) &&
+          !(c.sourceTags || []).some((s) => String(s).toLowerCase().includes(q))
+        )
+          return false;
+      }
+      if (ownershipFilter !== "Any Ownership") {
+        const oc = c.ownership_class || c.ownership;
+        if (oc !== ownershipFilter) return false;
+      }
+      if (revenueFilter !== "Any Revenue" && c.revenue && c.revenue !== revenueFilter) return false;
+      if (sizeFilter !== "Any Size" && c.employees && c.employees !== sizeFilter) return false;
+      if (!inFoundedEra(c.foundedYear, foundedFilter)) return false;
+      if (thesisRequireMissionCritical && !c.missionCritical) return false;
+      if (thesisRequireVertIntegrated && !c.verticallyIntegrated) return false;
+      if (thesisRequireProprietary && !c.proprietaryStack) return false;
+      if (
+        thesisRequireFounderVintage &&
+        !["Founder-Operated", "Vintage PE"].includes(c.ownership_class || "")
+      )
+        return false;
+      if (minOwnershipConfidence > 0 && (c.ownership_confidence || 0) < minOwnershipConfidence) return false;
+      return true;
+    })
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   return (
     <div style={{fontFamily:"'DM Mono','Courier New',monospace",background:"#0a0a0f",minHeight:"100vh",color:"#e8e4d9"}}>
@@ -283,6 +490,11 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
         .srch::placeholder{color:#222235}
         .fl{font-size:9px;color:#3a3a5a;letter-spacing:.16em;text-transform:uppercase;margin-bottom:5px;margin-top:11px;display:block}
         .scan-row{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(196,240,74,.04);border:1px solid rgba(196,240,74,.1);border-radius:4px;font-size:11px;color:#6a8a6a}
+        .gear-btn{cursor:pointer;background:transparent;border:1px solid #1e1e30;color:#6a6a8a;padding:4px 10px;border-radius:3px;font-size:11px}
+        .gear-btn:hover{border-color:#c4f04a;color:#c4f04a}
+        .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+        .modal-box{background:#0d0d1a;border:1px solid #1a1a2a;border-radius:8px;max-width:420px;width:100%;padding:18px 20px}
+        .chk-row{display:flex;align-items:center;gap:8px;font-size:11px;color:#8a8aaa;margin-top:6px;cursor:pointer}
       `}</style>
 
       {/* ── Header ── */}
@@ -292,9 +504,10 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
           <span style={{fontSize:10,color:"#222235",letterSpacing:"0.2em",textTransform:"uppercase"}}>Software Intelligence</span>
         </div>
         <div style={{display:"flex",gap:7,alignItems:"center"}}>
+          <button type="button" className="gear-btn" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
           {activeFilterCount>0&&<div style={{background:"rgba(240,132,74,.08)",border:"1px solid rgba(240,132,74,.2)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#f0844a"}}>{activeFilterCount} filter{activeFilterCount>1?"s":""} active</div>}
           {searchDone&&<div style={{background:"rgba(196,240,74,.06)",border:"1px solid rgba(196,240,74,.15)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#c4f04a"}}>{searchResults.length} found</div>}
-          <div style={{background:"rgba(196,240,74,.06)",border:"1px solid rgba(196,240,74,.15)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#c4f04a"}}>{savedCompanies.length} saved</div>
+          <div style={{background:"rgba(196,240,74,.06)",border:"1px solid rgba(196,240,74,.15)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#c4f04a"}}>{savedRows.length} saved</div>
         </div>
       </div>
 
@@ -344,6 +557,14 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                 <select className="sel" value={sizeFilter} onChange={e=>setSizeFilter(e.target.value)}>{EMPLOYEE_RANGES.map(s=><option key={s}>{s}</option>)}</select>
                 <span className="fl">Year Founded</span>
                 <select className="sel" value={foundedFilter} onChange={e=>setFoundedFilter(e.target.value)}>{FOUNDED_RANGES.map(s=><option key={s}>{s}</option>)}</select>
+                <div style={{fontSize:9,color:"#222235",letterSpacing:"0.18em",textTransform:"uppercase",marginTop:14,marginBottom:6}}>PE thesis filters</div>
+                <label className="chk-row"><input type="checkbox" checked={thesisRequireMissionCritical} onChange={e=>setThesisRequireMissionCritical(e.target.checked)}/> Mission-critical</label>
+                <label className="chk-row"><input type="checkbox" checked={thesisRequireVertIntegrated} onChange={e=>setThesisRequireVertIntegrated(e.target.checked)}/> Vertically integrated</label>
+                <label className="chk-row"><input type="checkbox" checked={thesisRequireProprietary} onChange={e=>setThesisRequireProprietary(e.target.checked)}/> Proprietary stack</label>
+                <label className="chk-row"><input type="checkbox" checked={thesisRequireFounderVintage} onChange={e=>setThesisRequireFounderVintage(e.target.checked)}/> Founder-op or vintage PE</label>
+                <span className="fl">Min ownership confidence</span>
+                <input type="range" min={0} max={1} step={0.05} value={minOwnershipConfidence} onChange={e=>setMinOwnershipConfidence(Number(e.target.value))} style={{width:"100%"}}/>
+                <div style={{fontSize:10,color:"#3a3a5a",marginTop:2}}>{minOwnershipConfidence.toFixed(2)}</div>
                 {activeFilterCount>0&&<button className="clr" style={{marginTop:14}} onClick={clearAll}>Clear all filters</button>}
               </div>
             )}
@@ -356,12 +577,12 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
           {/* Tab bar */}
           <div style={{borderBottom:"1px solid #131320",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px"}}>
             <div style={{display:"flex"}}>
-              {[["discover","Discover"],["saved",`Saved (${savedCompanies.length})`]].map(([id,lbl])=>(
+              {[["discover","Discover"],["saved",`Saved (${savedRows.length})`],["universe",`Universe (${universeTotal})`]].map(([id,lbl])=>(
                 <button key={id} className={`main-tab ${activeTab===id?"active":""}`} onClick={()=>setActiveTab(id)}>{lbl}</button>
               ))}
             </div>
             {activeTab==="saved"&&(
-              <button className={`export-btn ${exportFlash?"flash":""}`} onClick={exportToExcel} disabled={!savedList.length}>
+              <button className={`export-btn ${exportFlash?"flash":""}`} onClick={exportToExcel} disabled={!savedRows.length}>
                 <span>↓</span>{exportFlash?"Exported!":"Export to Excel"}
               </button>
             )}
@@ -408,7 +629,7 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                         Find Companies
                       </div>
                       <div style={{fontSize:12,color:"#3a3a5a",lineHeight:1.6}}>
-                        AI will scan G2, Capterra, industry directories, news, and the web to find every matching vendor. Set your filters in the sidebar and tag bar above, then hit search.
+                        Deterministic pipeline: PE portfolio pages, trade-association links, G2/Capterra listings, Brave/Exa (optional keys in <code style={{color:"#5a5a7a"}}>.env</code>), homepage scrape, OpenCorporates, and rule-based thesis scoring. Optional LLM classification from Settings.
                       </div>
                       <div style={{marginTop:10,display:"flex",gap:8,flexWrap:"wrap"}}>
                         <span style={{fontSize:11,color:"#c4f04a",background:"rgba(196,240,74,.08)",border:"1px solid rgba(196,240,74,.15)",padding:"3px 9px",borderRadius:3}}>{prodData.icon} {activeProduct}</span>
@@ -419,9 +640,14 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                         {sizeFilter!=="Any Size"&&<span style={{fontSize:11,color:"#7af0c4",background:"rgba(122,240,196,.08)",border:"1px solid rgba(122,240,196,.2)",padding:"3px 9px",borderRadius:3}}>{sizeFilter} emp</span>}
                       </div>
                     </div>
-                    <button className="search-btn" onClick={runSearch} disabled={searching}>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+                    <button className="search-btn" onClick={()=>runSearch(false)} disabled={searching}>
                       {searching ? <><span className="spin">◌</span>Scanning…</> : <><span>⌕</span>Search All Sources</>}
                     </button>
+                    <button className="clr" style={{width:"auto",padding:"10px 16px"}} onClick={()=>runSearch(true)} disabled={searching||!searchResults.length} title="Exclude current domains and run again">
+                      Find more
+                    </button>
+                    </div>
                   </div>
 
                   {/* Status / progress */}
@@ -447,37 +673,82 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                     <div style={{display:"flex",flexDirection:"column",gap:8}}>
                       {displayedResults.map(c=>{
                         const isExp=expandedCompany===c.id;
-                        const isSaved=savedCompanies.includes(c.id);
-                        const sc=c.score>=90?"#c4f04a":c.score>=80?"#4af0c4":c.score>=70?"#f0c44a":"#f0844a";
-                        const oc=ownerColor[c.ownership]||"#5a5a7a";
+                        const isSaved=!!c.is_saved;
+                        const sc=(c.score||0)>=90?"#c4f04a":(c.score||0)>=80?"#4af0c4":(c.score||0)>=70?"#f0c44a":"#f0844a";
+                        const ownLabel = c.ownership_class || c.ownership;
+                        const oc=ownerColor[ownLabel]||"#5a5a7a";
+                        const triageBtn = (field, val) => (
+                          <button type="button" className="save-btn" style={{padding:"2px 6px",fontSize:10}} onClick={(e)=>{e.stopPropagation();patchClassify(c.id,{[field]:val});}}>{val}</button>
+                        );
                         return (
                           <div key={c.id} className={`card ${isExp?"expanded":""}`} style={{cursor:"pointer"}} onClick={()=>setExpandedCompany(isExp?null:c.id)}>
                             <div style={{display:"flex",alignItems:"flex-start",gap:13}}>
-                              <div className="score-ring" style={{background:`${sc}10`,border:`1px solid ${sc}30`,color:sc}}>{c.score}</div>
+                              <div className="score-ring" style={{background:`${sc}10`,border:`1px solid ${sc}30`,color:sc}}>{c.score ?? "—"}</div>
                               <div style={{flex:1,minWidth:0}}>
                                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5,gap:8,flexWrap:"wrap"}}>
                                   <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
                                     <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#e8e4d9"}}>{c.name}</span>
-                                    {c.ownership&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{c.ownership}</span>}
+                                    {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
+                                    {c.classificationSource&&<span style={{fontSize:9,color:"#3a3a5a"}}>{c.classificationSource}</span>}
                                     {c.foundedYear&&<span style={{fontSize:10,color:"#2a2a4a"}}>Est. {c.foundedYear}</span>}
                                     {c.website&&<a href={c.website} target="_blank" rel="noopener noreferrer" style={{fontSize:10,color:"#3a3a6a",textDecoration:"none",background:"#0a0a12",padding:"2px 7px",borderRadius:2,border:"1px solid #131320"}} onClick={e=>e.stopPropagation()}>↗ website</a>}
                                   </div>
-                                  <button className={`save-btn ${isSaved?"saved":""}`} onClick={e=>{e.stopPropagation();isSaved?unsaveCompany(c.id):saveCompany(c.id);}}>
+                                  <button className={`save-btn ${isSaved?"saved":""}`} onClick={e=>{e.stopPropagation();saveCompany(c.id,!isSaved);}}>
                                     {isSaved?"✓ Saved":"+ Save"}
                                   </button>
                                 </div>
+                                <div style={{fontSize:11,color:"#4a4a6a",marginBottom:4}}>
+                                  MC:{c.missionCritical?"Y":"N"} · VI:{c.verticallyIntegrated?"Y":"N"} · Prop:{c.proprietaryStack?"Y":"N"}
+                                  {typeof c.ownership_confidence==="number"&&<span style={{marginLeft:8}}>conf {c.ownership_confidence.toFixed(2)}</span>}
+                                </div>
                                 <div style={{fontSize:12,color:"#565670",marginBottom:8,lineHeight:1.5}}>{c.description}</div>
                                 <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                                  {(c.sourceTags||[]).map(s=><span key={s} style={{fontSize:10,color:"#7af0c4",background:"rgba(122,240,196,.08)",padding:"2px 7px",borderRadius:2,border:"1px solid rgba(122,240,196,.2)"}}>{s}</span>)}
                                   {(c.verticals||[]).map(v=><span key={v} style={{fontSize:10,color:"#f0844a",background:"rgba(240,132,74,.06)",padding:"2px 7px",borderRadius:2,border:"1px solid rgba(240,132,74,.15)"}}>{v}</span>)}
                                   {(c.tags||[]).map(t=><span key={t} style={{fontSize:10,color:"#2a2a4a",background:"#0a0a12",padding:"2px 7px",borderRadius:2,border:"1px solid #0f0f1e"}}>{t}</span>)}
                                 </div>
                               </div>
                             </div>
                             {isExp&&(
-                              <div className="fi" style={{marginTop:13,paddingTop:13,borderTop:"1px solid #131320",display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12}}>
-                                {[["Founded",c.foundedYear||"—"],["HQ",c.hq||"—"],["Country",c.country||"—"],["Employees",c.employees||"—"],["Revenue",c.revenue||"—"]].map(([k,v])=>(
-                                  <div key={k}><div style={{fontSize:9,color:"#1e1e30",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>{k}</div><div style={{fontSize:12,color:"#b8b4a8"}}>{v}</div></div>
-                                ))}
+                              <div className="fi" style={{marginTop:13,paddingTop:13,borderTop:"1px solid #131320"}}>
+                                <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:12}}>
+                                  {[["Founded",c.foundedYear||"—"],["HQ",c.hq||"—"],["Country",c.country||"—"],["Employees",c.employees||"—"],["Revenue",c.revenue||"—"]].map(([k,v])=>(
+                                    <div key={k}><div style={{fontSize:9,color:"#1e1e30",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>{k}</div><div style={{fontSize:12,color:"#b8b4a8"}}>{v}</div></div>
+                                  ))}
+                                </div>
+                                {(c.acquisitionHistory||[]).length>0&&(
+                                  <div style={{fontSize:11,color:"#6a6a8a",marginBottom:8}}>
+                                    <span style={{color:"#2a2a4a",letterSpacing:".12em",textTransform:"uppercase",fontSize:9}}>Acquisitions</span>{" "}
+                                    {(c.acquisitionHistory||[]).map((a,i)=><span key={i}>{a.year||"?"} {a.acquirer||""}{i<(c.acquisitionHistory||[]).length-1?"; ":""}</span>)}
+                                  </div>
+                                )}
+                                {(c.missionCriticalReasonLLM||c.verticalIntegrationReasonLLM)&&(
+                                  <div style={{fontSize:11,color:"#6a6a8a",marginBottom:8,lineHeight:1.5}}>
+                                    {c.missionCriticalReasonLLM&&<div><b style={{color:"#8a8aaa"}}>LLM MC:</b> {c.missionCriticalReasonLLM}</div>}
+                                    {c.verticalIntegrationReasonLLM&&<div><b style={{color:"#8a8aaa"}}>LLM VI:</b> {c.verticalIntegrationReasonLLM}</div>}
+                                  </div>
+                                )}
+                                {(c.sources||[]).length>0&&(
+                                  <div style={{fontSize:10,color:"#3a3a5a",marginBottom:10}}>
+                                    {(c.sources||[]).slice(0,6).map((u,i)=><div key={i} style={{marginTop:3}}><a href={u} target="_blank" rel="noopener noreferrer" style={{color:"#5a5a8a"}} onClick={e=>e.stopPropagation()}>{u}</a></div>)}
+                                  </div>
+                                )}
+                                <div style={{fontSize:10,color:"#8a8aaa",marginBottom:6}}>Manual triage</div>
+                                <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+                                  <span style={{color:"#3a3a5a"}}>Mission-critical</span>
+                                  {triageBtn("manualMissionCritical","yes")}
+                                  {triageBtn("manualMissionCritical","no")}
+                                  {triageBtn("manualMissionCritical","maybe")}
+                                  {triageBtn("manualMissionCritical","unset")}
+                                  <span style={{color:"#3a3a5a",marginLeft:12}}>Vertical</span>
+                                  {triageBtn("manualVerticallyIntegrated","yes")}
+                                  {triageBtn("manualVerticallyIntegrated","no")}
+                                  {triageBtn("manualVerticallyIntegrated","maybe")}
+                                  {triageBtn("manualVerticallyIntegrated","unset")}
+                                </div>
+                                {c.homepageTextSample&&(
+                                  <pre style={{marginTop:10,maxHeight:120,overflow:"auto",fontSize:9,color:"#4a4a6a",whiteSpace:"pre-wrap",background:"#08080e",padding:8,borderRadius:4,border:"1px solid #131320"}}>{String(c.homepageTextSample).slice(0,1200)}</pre>
+                                )}
                               </div>
                             )}
                           </div>
@@ -492,7 +763,7 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                   <div style={{textAlign:"center",padding:"50px 0",color:"#1e1e30"}}>
                     <div style={{fontSize:32,marginBottom:12}}>⌕</div>
                     <div style={{fontSize:13,color:"#2a2a4a"}}>Set your filters and click Search All Sources</div>
-                    <div style={{fontSize:11,marginTop:6,color:"#1a1a2a"}}>AI will scan G2, Capterra, directories, and the web</div>
+                    <div style={{fontSize:11,marginTop:6,color:"#1a1a2a"}}>Run npm run dev (starts API + Vite). Add Brave/Exa keys in .env for more coverage.</div>
                   </div>
                 )}
                 {!searching&&searchDone&&displayedResults.length===0&&(
@@ -507,7 +778,7 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
             {/* ─ Saved ─ */}
             {activeTab==="saved"&&(
               <div className="fi">
-                {savedList.length===0?(
+                {savedRows.length===0?(
                   <div style={{textAlign:"center",padding:"58px 0",color:"#2a2a4a"}}>
                     <div style={{fontSize:28,marginBottom:10}}>◌</div>
                     <div style={{fontSize:13}}>No saved companies yet</div>
@@ -517,7 +788,7 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                   <>
                     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,padding:"10px 14px",background:"rgba(196,240,74,.04)",border:"1px solid rgba(196,240,74,.1)",borderRadius:4}}>
                       <div>
-                        <span style={{fontSize:12,color:"#c4f04a",fontFamily:"'Syne',sans-serif",fontWeight:700}}>{savedList.length} compan{savedList.length===1?"y":"ies"} in your sourcing file</span>
+                        <span style={{fontSize:12,color:"#c4f04a",fontFamily:"'Syne',sans-serif",fontWeight:700}}>{savedRows.length} compan{savedRows.length===1?"y":"ies"} in your sourcing file</span>
                         <span style={{fontSize:11,color:"#3a3a5a",marginLeft:10}}>Fill in contact details, then export</span>
                       </div>
                       <button className={`export-btn ${exportFlash?"flash":""}`} onClick={exportToExcel}>
@@ -525,22 +796,23 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
                       </button>
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                      {savedList.map(c=>{
+                      {savedRows.map(c=>{
                         const m=companyMeta[c.id]||defaultMeta();
-                        const oc=ownerColor[c.ownership]||"#5a5a7a";
+                        const ownLabel=c.ownership_class||c.ownership;
+                        const oc=ownerColor[ownLabel]||"#5a5a7a";
                         const qc=qualityColor[m.quality];
                         return (
                           <div key={c.id} style={{border:"1px solid #1a1a2a",background:"#0d0d1a",borderRadius:5,overflow:"hidden"}}>
                             <div style={{padding:"13px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,borderBottom:"1px solid #131320"}}>
                               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",minWidth:0}}>
                                 <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#e8e4d9"}}>{c.name}</span>
-                                {c.ownership&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{c.ownership}</span>}
+                                {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
                                 {c.hq&&<span style={{fontSize:10,color:"#3a3a5a"}}>{c.hq}</span>}
                                 {c.foundedYear&&<span style={{fontSize:10,color:"#2a2a4a"}}>Est. {c.foundedYear}</span>}
                                 {c.employees&&<span style={{fontSize:10,color:"#2a2a4a"}}>{c.employees} emp</span>}
                                 {c.revenue&&<span style={{fontSize:10,color:"#2a2a4a"}}>{c.revenue}</span>}
                               </div>
-                              <button className="save-btn saved" style={{flexShrink:0}} onClick={()=>unsaveCompany(c.id)}>Remove</button>
+                              <button className="save-btn saved" style={{flexShrink:0}} onClick={()=>saveCompany(c.id,false)}>Remove</button>
                             </div>
                             <div style={{padding:"12px 16px",display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 2fr",gap:10,alignItems:"start"}}>
                               {[["Website","website","https://…"],["Contact Name","contactName","Full name"],["Role","role","Title"],["Email","email","email@co.com"]].map(([lbl,field,ph])=>(
@@ -574,9 +846,66 @@ Search exhaustively. Run many searches. Return as many real companies as possibl
               </div>
             )}
 
+            {activeTab==="universe"&&(
+              <div className="fi">
+                <div style={{fontSize:12,color:"#3a3a5a",marginBottom:12}}>
+                  All companies persisted in <code style={{color:"#5a5a7a"}}>universe.db</code> ({universeTotal} total, showing {universeRows.length}).
+                </div>
+                <button className="clr" style={{width:"auto",marginBottom:12}} onClick={loadUniverseRows}>Refresh</button>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {universeRows.map((c)=>{
+                    const ownLabel=c.ownership_class||c.ownership;
+                    const oc=ownerColor[ownLabel]||"#5a5a7a";
+                    return (
+                      <div key={c.id} className="card" style={{cursor:"default"}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                            <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,color:"#e8e4d9"}}>{c.name}</span>
+                            {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
+                            {c.is_saved&&<span style={{fontSize:10,color:"#c4f04a"}}>saved</span>}
+                            <span style={{fontSize:10,color:"#3a3a5a"}}>{c.domain}</span>
+                          </div>
+                          <div style={{display:"flex",gap:6}}>
+                            <a className="save-btn" href={c.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>↗ site</a>
+                            <button className="save-btn" onClick={()=>saveCompany(c.id,!c.is_saved)}>{c.is_saved?"Unsave":"Save"}</button>
+                          </div>
+                        </div>
+                        <div style={{fontSize:11,color:"#4a4a6a",marginTop:6}}>Score {(c.score ?? c.thesisScore) || "—"} · {(c.sourceTags||[]).join(" · ")}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
       </div>
+
+      {settingsOpen && (
+        <div className="modal-bg" onClick={() => setSettingsOpen(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15,marginBottom:10}}>Settings</div>
+            <div style={{fontSize:11,color:"#6a6a8a",marginBottom:12}}>API keys live in server <code>.env</code> (never in the browser). Badges show what the server detected.</div>
+            <span className="fl" style={{marginTop:0}}>LLM classifier (optional)</span>
+            <select className="sel" value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
+              {["none","openai","anthropic","gemini","ollama"].map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <div style={{marginTop:14,fontSize:10,color:"#3a3a5a",lineHeight:1.6}}>
+              <div>Brave: {apiStatus.brave ? "on" : "off"}</div>
+              <div>Exa: {apiStatus.exa ? "on" : "off"}</div>
+              <div>Apollo: {apiStatus.apollo ? "on" : "off"}</div>
+              <div>Crunchbase: {apiStatus.crunchbase ? "on" : "off"}</div>
+              <div>OpenAI: {apiStatus.openai ? "on" : "off"}</div>
+              <div>Anthropic: {apiStatus.anthropic ? "on" : "off"}</div>
+              <div>Gemini: {apiStatus.gemini ? "on" : "off"}</div>
+            </div>
+            <button className="search-btn" style={{marginTop:16,width:"100%",justifyContent:"center"}} type="button" onClick={() => setSettingsOpen(false)}>Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
