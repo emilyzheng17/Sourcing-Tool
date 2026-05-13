@@ -53,7 +53,7 @@ export async function searchCrunchbase(brief, env) {
             ? webRaw.startsWith("http")
               ? webRaw
               : (webRaw ? `https://${webRaw}` : "")
-            : "";
+            : ""
         const empEnum = props.num_employees_enum;
         let employees = null;
         if (typeof empEnum === "string") {
