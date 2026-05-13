@@ -5,7 +5,6 @@
 import { fanOutSources } from "../sources/index.js";
 import { normalizeDomain, mergeSourceTags, isLikelyCompanyDomain } from "./domains.js";
 
-const DEFAULT_PRODUCT = "ERP & Operations";
 const MAX_MERGE_CAP = 5000;
 
 export function primaryKey(c) {
@@ -69,6 +68,10 @@ export function mergeFlatCandidates(list) {
 }
 
 function tagsForProduct(brief, product) {
+  if (product == null) {
+    if (Array.isArray(brief.selectedTags)) return brief.selectedTags;
+    return [];
+  }
   const by = brief.selectedTagsByProduct;
   if (by && typeof by === "object" && by[product]) {
     return Object.values(by[product])
@@ -102,7 +105,7 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
       ? brief.selectedProducts
       : brief.activeProduct
         ? [brief.activeProduct]
-        : [DEFAULT_PRODUCT];
+        : [null];
 
   /** Single broad pass (no explicit vertical) uses [] → queryTemplates + tradeAssocs defaults */
   const verticalContexts =
@@ -127,23 +130,27 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
       }
       const subBrief = {
         ...brief,
-        activeProduct: product,
+        activeProduct: product ?? brief.activeProduct ?? "B2B software",
         selectedTags: tagsForProduct(brief, product),
         selectedVerticals: selectedVerticalsForPass,
       };
       emitFn({
         type: "log",
-        message: `Fan-out: [${verticalLabel}] × ${product} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
+        message: `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
       });
       const buckets = await fanOutSources(subBrief, env, fetchOpts);
       const counts = Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v?.length || 0]));
       for (const [k, n] of Object.entries(counts)) bucketTotals[k] = (bucketTotals[k] ?? 0) + n;
-      emitFn({ type: "log", message: `Sources raw [${verticalLabel}] (${product}): ${JSON.stringify(counts)}` });
+      emitFn({
+        type: "log",
+        message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(counts)}`,
+      });
 
-      const mergedPart = mergeCandidates(buckets).map((c) => ({
-        ...c,
-        matchedProducts: [...new Set([...(c.matchedProducts || []), product])],
-      }));
+      const mergedPart = mergeCandidates(buckets).map((c) =>
+        product
+          ? { ...c, matchedProducts: [...new Set([...(c.matchedProducts || []), product])] }
+          : c,
+      );
       flatTagged.push(...mergedPart);
     }
   }

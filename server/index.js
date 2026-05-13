@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { EventEmitter } from "node:events";
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
@@ -10,8 +11,20 @@ import {
   setSaved,
   setManualClassify,
   getCompanyById,
+  setRejected,
+  bulkRejectIds,
+  bulkRestoreRejectedIds,
+  listActiveCompanySimilarityStubs,
+  getCompaniesByIds,
+  iterateActiveUniverseRows,
 } from "./db.js";
+import { companyPassesDiscoverFilters } from "../shared/discoverCompanyFilter.js";
 import { expandFromSavedPortfolio } from "./lib/savedProfileExpand.js";
+import { stubFromRow, findSimilarToAnchors } from "./lib/companySimilarity.js";
+
+// Undici's fetch() attaches several internal listeners per in-flight request. The search
+// pipeline runs many concurrent fetches (see pipeline.js p-limit); default limit is 10.
+EventEmitter.defaultMaxListeners = Math.max(EventEmitter.defaultMaxListeners || 10, 32);
 
 const app = express();
 app.use(cors());
@@ -123,13 +136,58 @@ app.post("/api/recommendations/from-saved", async (req, res) => {
 app.get("/api/universe", (req, res) => {
   const offset = parseInt(req.query.offset || "0", 10) || 0;
   const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 5000);
-  const savedOnly = req.query.savedOnly === "1" || req.query.savedOnly === "true";
-  const { rows, total } = listUniverse({ offset, limit, savedOnly });
+  const rejectedOnly = req.query.rejectedOnly === "1" || req.query.rejectedOnly === "true";
+  const savedOnly =
+    !rejectedOnly && (req.query.savedOnly === "1" || req.query.savedOnly === "true");
+  const { rows, total } = listUniverse({ offset, limit, savedOnly, rejectedOnly });
   res.json({
     total,
     offset,
     companies: rows.map(rowToCompany),
   });
+});
+
+app.post("/api/universe/query", (req, res) => {
+  try {
+    const body = req.body || {};
+    const offset = Math.max(0, parseInt(String(body.offset ?? "0"), 10) || 0);
+    const limit = Math.min(5000, Math.max(1, parseInt(String(body.limit ?? "500"), 10) || 500));
+    const criteria = typeof body.criteria === "object" && body.criteria != null ? body.criteria : {};
+
+    let total = 0;
+    const companies = [];
+    for (const row of iterateActiveUniverseRows()) {
+      const c = rowToCompany(row);
+      if (!companyPassesDiscoverFilters(c, criteria)) continue;
+      if (total >= offset && companies.length < limit) companies.push(c);
+      total += 1;
+    }
+    res.json({ ok: true, total, offset, limit, companies });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.post("/api/companies/bulk-reject", (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x) => parseInt(String(x), 10)).filter(Number.isFinite) : [];
+  if (!ids.length) {
+    res.status(400).json({ ok: false, message: "Provide a non-empty ids array" });
+    return;
+  }
+  const changed = bulkRejectIds(ids);
+  res.json({ ok: true, rejectedCount: changed });
+});
+
+app.post("/api/companies/bulk-restore", (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map((x) => parseInt(String(x), 10)).filter(Number.isFinite)
+    : [];
+  if (!ids.length) {
+    res.status(400).json({ ok: false, message: "Provide a non-empty ids array" });
+    return;
+  }
+  const restoredCount = bulkRestoreRejectedIds(ids);
+  res.json({ ok: true, restoredCount });
 });
 
 app.post("/api/companies/:id/save", (req, res) => {
@@ -157,6 +215,57 @@ app.post("/api/companies/:id/classify", (req, res) => {
   });
   const row = getCompanyById(id);
   res.json(rowToCompany(row));
+});
+
+app.post("/api/companies/:id/reject", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ ok: false, message: "Invalid id" });
+    return;
+  }
+  const rejected = !!req.body?.rejected;
+  setRejected(id, rejected);
+  const row = getCompanyById(id);
+  if (!row) {
+    res.status(404).json({ ok: false, message: "Company not found" });
+    return;
+  }
+  res.json(rowToCompany(row));
+});
+
+app.post("/api/universe/similar-to-rejected", (req, res) => {
+  try {
+    const body = req.body || {};
+    const anchorIds = Array.isArray(body.anchorIds)
+      ? body.anchorIds.map((x) => parseInt(String(x), 10)).filter(Number.isFinite)
+      : [];
+    if (!anchorIds.length) {
+      res.status(400).json({ ok: false, message: "Provide anchorIds (rejected company ids)" });
+      return;
+    }
+    const limit = Math.min(500, Math.max(1, parseInt(String(body.limit ?? 100), 10) || 100));
+    const minScore = Math.min(1, Math.max(0, parseFloat(String(body.minScore ?? "0.84")) || 0.84));
+
+    const anchorRows = getCompaniesByIds(anchorIds);
+    const validAnchors = anchorRows.filter((r) => r.is_rejected);
+    if (!validAnchors.length) {
+      res.status(400).json({ ok: false, message: "No rejected anchors among the given ids" });
+      return;
+    }
+    const anchorStubs = validAnchors.map(stubFromRow);
+    const candidateRows = listActiveCompanySimilarityStubs();
+    const candidateStubs = candidateRows.map(stubFromRow);
+    const found = findSimilarToAnchors(anchorStubs, candidateStubs, { minScore, limit });
+    const matches = found.map(({ stub, score }) => ({
+      id: stub.id,
+      domain: stub.domain,
+      name: stub.nameStr,
+      score: Math.round(score * 1000) / 1000,
+    }));
+    res.json({ ok: true, matches });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);

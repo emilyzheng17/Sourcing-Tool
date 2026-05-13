@@ -6,6 +6,7 @@ import { extractOrganizationSignals } from "./lib/schemaOrgSignals.js";
 import { tryFetchAtsSignals } from "./lib/atsPublic.js";
 import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePageText.js";
 import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
+import { evaluateProductFit } from "./lib/productFit.js";
 
 const MISSION_KW = [
   "system of record",
@@ -359,17 +360,17 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
   const hwHits = countKeywordHits(lower, HARDWARE_KW);
   const { companyType, companyTypeConfidence } = classifyCompanyType(swHits, hwHits);
 
-  const productLabel =
-    (resolved.matchedProducts?.length && resolved.matchedProducts.join(" · ")) || brief.activeProduct || "Software";
-
-  const products =
+  const candidateProducts =
     resolved.matchedProducts?.length > 0
       ? [...new Set(resolved.matchedProducts)]
       : brief.activeProduct
         ? [brief.activeProduct]
         : [];
 
-  const desc = buildDescription(combinedText, resolved.name, productLabel);
+  const provisionalLabel =
+    (candidateProducts.length && candidateProducts.join(" · ")) || brief.activeProduct || "Software";
+
+  let desc = buildDescription(combinedText, resolved.name, provisionalLabel);
   const homepageSample = combinedText.slice(0, 4000);
   const selectedVerts = Array.isArray(brief.selectedVerticals) ? brief.selectedVerticals : [];
   const fitCorpus = buildVerticalFitCorpus({
@@ -380,6 +381,16 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     rawMetadata: resolved.rawMetadata,
   });
   const fit = evaluateVerticalFit(selectedVerts, fitCorpus, resolved.rawMetadata?.apolloIndustry);
+
+  const selectedProds = Array.isArray(brief.selectedProducts) ? brief.selectedProducts : [];
+  const productFit = evaluateProductFit(selectedProds, candidateProducts, fitCorpus, resolved.rawMetadata?.apolloIndustry);
+  const verifiedProducts = productFit.verifiedProducts;
+  const products = verifiedProducts;
+  const productLabel =
+    verifiedProducts.length > 0 ? verifiedProducts.join(" · ") : brief.activeProduct || "Software";
+  if (productLabel !== provisionalLabel) {
+    desc = buildDescription(combinedText, resolved.name, productLabel);
+  }
 
   return {
     ...resolved,
@@ -402,6 +413,11 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     verticalFitScore: fit.verticalFitScore,
     verticalFitReasons: fit.verticalFitReasons,
     products,
+    matchedProducts: verifiedProducts,
+    unverifiedProducts: productFit.unverifiedProducts,
+    productFitScore: productFit.productFitScore,
+    productFitReasons: productFit.productFitReasons,
+    productFitByProduct: productFit.productFitByProduct,
     tags: Array.isArray(brief.selectedTags) ? brief.selectedTags : [],
     acquisitionHistory,
     founderStillOperating,

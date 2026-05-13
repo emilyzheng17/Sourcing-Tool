@@ -6,6 +6,7 @@ import { discoverMergedCandidates } from "./lib/candidateDiscovery.js";
 import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from "./db.js";
 import { breadthMultiplier } from "./lib/breadth.js";
 import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
+import { normalizeToIso2 } from "../shared/geoCountry.js";
 import pLimit from "p-limit";
 
 const JOB_MS_MIN = 10 * 60 * 1000;
@@ -87,6 +88,20 @@ export async function runSearchPipeline(brief, env, emit) {
         }
         if (!enriched) return;
 
+        const allowedGeo = brief.allowedCountries;
+        if (Array.isArray(allowedGeo) && allowedGeo.length > 0) {
+          const allowedSet = new Set(
+            allowedGeo.map((x) => String(x).trim().toUpperCase()).filter((x) => /^[A-Z]{2}$/.test(x)),
+          );
+          if (allowedSet.size > 0) {
+            const iso = normalizeToIso2(enriched.country);
+            if (iso != null && !allowedSet.has(iso)) {
+              emit({ type: "log", message: `Skipped (geo ${iso}): ${enriched.name}` });
+              return;
+            }
+          }
+        }
+
         const strictVertical =
           !!(brief.strictVerticalFit ||
             ["1", "true", "yes"].includes(String(env.STRICT_VERTICAL_FIT || "").toLowerCase()));
@@ -101,6 +116,19 @@ export async function runSearchPipeline(brief, env, emit) {
           emit({
             type: "log",
             message: `Skipped (strict vertical, fit ${enriched.verticalFitScore}): ${enriched.name}`,
+          });
+          return;
+        }
+
+        if (
+          Array.isArray(brief.selectedProducts) &&
+          brief.selectedProducts.length > 0 &&
+          Array.isArray(enriched.matchedProducts) &&
+          enriched.matchedProducts.length === 0
+        ) {
+          emit({
+            type: "log",
+            message: `Skipped (no product fit, score ${enriched.productFitScore ?? 0}): ${enriched.name}`,
           });
           return;
         }

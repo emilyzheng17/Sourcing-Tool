@@ -3,6 +3,8 @@
  */
 
 import { vertScoreFromVerticalFit } from "./lib/verticalFit.js";
+import { productFitThesisPenalty } from "./lib/productFit.js";
+import { inferOwnershipClass } from "./lib/ownershipClassify.js";
 
 /** @param {string|null|undefined} s */
 function employeeMidpoint(s) {
@@ -106,15 +108,7 @@ export function scoreThesis(enriched, brief) {
 
   const proprietaryStack = (enriched.ossSignals || 0) === 0;
 
-  const acqYears = (enriched.acquisitionHistory || [])
-    .map((a) => a.year)
-    .filter((y) => typeof y === "number" && y > 1980 && y < 2030);
-  const minAcq = acqYears.length ? Math.min(...acqYears) : null;
-
-  let ownership_class = "Unknown";
-  if (minAcq != null && minAcq < 2020) ownership_class = "Vintage PE";
-  else if (minAcq != null && minAcq >= 2020) ownership_class = "Recent PE";
-  if (enriched.founderStillOperating === true) ownership_class = "Founder-Operated";
+  const { ownership_class, ownership_confidence } = inferOwnershipClass(enriched);
 
   const ownershipMatch =
     ownership_class === "Vintage PE" || ownership_class === "Founder-Operated" ? 1 : 0;
@@ -142,6 +136,14 @@ export function scoreThesis(enriched, brief) {
   );
   thesisScore = Math.max(0, Math.min(100, thesisScore));
 
+  if (
+    Array.isArray(brief.selectedProducts) &&
+    brief.selectedProducts.length > 0 &&
+    typeof enriched.productFitScore === "number"
+  ) {
+    thesisScore = Math.max(0, Math.min(100, thesisScore - productFitThesisPenalty(enriched.productFitScore)));
+  }
+
   const missionCritical = missionScore >= 2;
   const verticallyIntegrated = vertScore >= 1;
 
@@ -159,7 +161,7 @@ export function scoreThesis(enriched, brief) {
     proprietaryStackRule: proprietaryStack,
     missionCriticalScore: missionScore,
     verticalIntegrationScore: vertScore,
-    ownership_confidence: minAcq != null ? 0.75 : enriched.rawMetadata?.peFirm ? 0.65 : 0.35,
+    ownership_confidence,
     missionCritical,
     verticallyIntegrated,
     proprietaryStack,

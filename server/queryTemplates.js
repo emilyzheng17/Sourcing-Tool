@@ -30,13 +30,31 @@ export function buildSearchQueries(brief) {
     queries.push(`${productSlug} ${tags} enterprise`);
   }
 
-  if (ownershipFilter === "Founder-Owned" || ownershipFilter === "Founder-Operated") {
+  if (ownershipFilter === "Founder-Operated") {
     queries.push(`founder owned ${productSlug} software`);
     queries.push(`bootstrapped ${productSlug} B2B`);
   }
-  if (ownershipFilter === "Private Equity" || ownershipFilter === "Vintage PE") {
+  if (ownershipFilter === "Private Equity" || ownershipFilter === "Vintage PE" || ownershipFilter === "Recent PE") {
     queries.push(`private equity portfolio ${productSlug} software`);
     queries.push(`acquired ${productSlug} software 2015..2019`);
+  }
+  if (ownershipFilter === "VC-Backed") {
+    queries.push(`${productSlug} B2B SaaS series A`);
+    queries.push(`venture backed ${productSlug} software`);
+  }
+  if (ownershipFilter === "Publicly Traded") {
+    queries.push(`${productSlug} enterprise software publicly traded`);
+    queries.push(`site:sec.gov ${productSlug} software 10-K`);
+  }
+  if (ownershipFilter === "Acquired") {
+    queries.push(`acquired ${productSlug} software company`);
+    queries.push(`M&A ${productSlug} vertical software`);
+  }
+  if (ownershipFilter === "Family-Owned") {
+    queries.push(`family owned ${productSlug} software`);
+  }
+  if (ownershipFilter === "Employee-Owned (ESOP)") {
+    queries.push(`ESOP ${productSlug} software company`);
   }
 
   if (!selectedVerticals.length) {

@@ -4,11 +4,9 @@
  */
 
 import { KNOWN_VERTICALS } from "./portfolioProductNames.js";
+import { VERTICAL_MATCH_THRESHOLD } from "../../shared/verticalFitConstants.js";
 
-export { KNOWN_VERTICALS };
-
-/** Minimum per-vertical signal (0–100) to count as matched */
-export const VERTICAL_MATCH_THRESHOLD = 38;
+export { KNOWN_VERTICALS, VERTICAL_MATCH_THRESHOLD };
 
 /** Below this overall fit score, pipeline applies a thesis penalty when verticals are selected */
 export const VERTICAL_FIT_WEAK_THRESHOLD = 40;

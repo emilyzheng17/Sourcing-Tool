@@ -4,8 +4,11 @@ import { useTheme } from "./hooks/useTheme.js";
 import { DashboardShell } from "./components/DashboardShell.jsx";
 import { AppBar } from "./components/AppBar.jsx";
 import { FilterDrawer } from "./components/FilterDrawer.jsx";
+import { DiscoverFilterPanel } from "./components/DiscoverFilterPanel.jsx";
 import { SettingsDrawer } from "./components/SettingsDrawer.jsx";
 import { CommandPalette } from "./components/CommandPalette.jsx";
+import { DEFAULT_ALLOWED_COUNTRY_CODES } from "../shared/geoCountry.js";
+import { companyPassesDiscoverFilters } from "../shared/discoverCompanyFilter.js";
 
 const VERTICALS = [
   "Metals & Mining","Bulk Materials","Bulk Liquids","Forestry & Lumber",
@@ -31,6 +34,8 @@ const SOFTWARE_PRODUCTS = {
   "Business Intelligence & Reporting": { icon:"▦", description:"Dashboards, KPIs, analytics, data integration, operational reporting", filters:{ "Capabilities":["Custom Dashboards","KPI Tracking","Data Integration","Predictive Analytics","Scheduled Reports"], "Industry Fit":["Mining","Contractor","Logistics","Manufacturing","Multi-site Ops"], "Deployment":["Cloud (SaaS)","On-Premise","Hybrid"], "Integrations":["ERP Connector","API-First","Data Warehouse","Native Connectors"] } },
 };
 
+const SOFTWARE_PRODUCT_KEYS = Object.keys(SOFTWARE_PRODUCTS);
+
 const OWNERSHIP_TYPES = [
   "Any Ownership",
   "Founder-Operated",
@@ -44,72 +49,6 @@ const OWNERSHIP_TYPES = [
   "Family-Owned",
   "Employee-Owned (ESOP)",
 ];
-
-const DEFAULT_PRODUCT_KEY = Object.keys(SOFTWARE_PRODUCTS)[0];
-
-function inFoundedEra(year, label) {
-  if (label === "Any Era" || year == null || Number.isNaN(Number(year))) return true;
-  const y = Number(year);
-  if (label === "Before 2017 (ideal)") return y < 2017;
-  if (label === "Before 2010") return y < 2010;
-  if (label === "2017–Present" || label === "2017-Present") return y >= 2017;
-  if (label === "2020–Present") return y >= 2020;
-  if (label === "2015–2019") return y >= 2015 && y <= 2019;
-  if (label === "2010–2016") return y >= 2010 && y <= 2016;
-  if (label === "2010–2014") return y >= 2010 && y <= 2014;
-  if (label === "2000–2009") return y >= 2000 && y <= 2009;
-  if (label === "Before 2000") return y < 2000;
-  return true;
-}
-
-/** Midpoint headcount for UI band labels (aligns with server/score.js) */
-function employeeBandMidpoint(s) {
-  if (!s || typeof s !== "string") return null;
-  const t = s.toLowerCase().replace(/–/g, "-");
-  if (t.includes("1000+") || t.includes("1,000+")) return 1500;
-  if (t.includes("501") && t.includes("1,000")) return 750;
-  if (t.includes("201") && t.includes("500")) return 350;
-  if (t.includes("51") && t.includes("200")) return 125;
-  if (t.includes("15") && t.includes("100")) return 57;
-  if (t.includes("11") && t.includes("50")) return 30;
-  if (t.includes("1-10") || t.includes("1–10")) return 5;
-  return null;
-}
-
-function revenueBandMidpointMillions(s) {
-  if (!s || typeof s !== "string") return null;
-  const t = s.toLowerCase().replace(/–/g, "-");
-  if (t.includes("200m+") || t.includes("$200m")) return 300;
-  if (t.includes("50m") && t.includes("200m")) return 125;
-  if (t.includes("20m") && t.includes("50m")) return 35;
-  if (t.includes("5m") && t.includes("20m")) return 12;
-  if (t.includes("2m") && t.includes("10m")) return 6;
-  if (t.includes("1m") && t.includes("5m")) return 3;
-  if (t.includes("< $1m") || t.includes("<$1m")) return 0.5;
-  return null;
-}
-
-function matchesEmployeeFilter(c, filter) {
-  if (filter === "Any Size") return true;
-  if (!c.employees) return true;
-  if (filter === "15-100 (ideal)") {
-    const mid = employeeBandMidpoint(c.employees);
-    if (mid == null) return true;
-    return mid >= 15 && mid <= 100;
-  }
-  return c.employees === filter;
-}
-
-function matchesRevenueFilter(c, filter) {
-  if (filter === "Any Revenue") return true;
-  if (!c.revenue) return true;
-  if (filter === "$2M-$10M (ideal)") {
-    const m = revenueBandMidpointMillions(c.revenue);
-    if (m == null) return true;
-    return m >= 2 && m <= 10;
-  }
-  return c.revenue === filter;
-}
 
 const REVENUE_RANGES = [
   "Any Revenue",
@@ -145,16 +84,6 @@ const FOUNDED_RANGES = [
 ];
 const QUALITY_TIERS = ["—","Bronze","Silver","Gold","Platinum"];
 const COMPANY_TYPES = ["Any Type", "Software", "Hardware", "Hybrid", "Unknown"];
-
-function matchesCompanyTypeFilter(c, filter) {
-  if (filter === "Any Type") return true;
-  const t = (c.companyType || "unknown").toLowerCase();
-  if (filter === "Software") return t === "software" || t === "unknown";
-  if (filter === "Hardware") return t === "hardware" || t === "hybrid";
-  if (filter === "Hybrid") return t === "hybrid";
-  if (filter === "Unknown") return t === "unknown";
-  return true;
-}
 
 const OWNER_BADGE_CLASS = {
   "VC-Backed": "border-emerald-500/35 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100",
@@ -208,8 +137,7 @@ const pillBase =
 const defaultMeta = () => ({ website:"", contactName:"", role:"", email:"", quality:"—", comments:"" });
 
 export default function CompanySourcingTool() {
-  const [selectedProducts, setSelectedProducts] = useState([DEFAULT_PRODUCT_KEY]);
-  const [selectedTagsByProduct, setSelectedTagsByProduct] = useState({});
+  const [selectedProducts, setSelectedProducts] = useState([]);
   const [selectedVerticals, setSelectedVerticals] = useState([]);
   const [ownershipFilter, setOwnershipFilter] = useState("Any Ownership");
   const [companyTypeFilter, setCompanyTypeFilter] = useState("Any Type");
@@ -234,13 +162,20 @@ export default function CompanySourcingTool() {
   const [recModalOpen, setRecModalOpen] = useState(false);
   const [recPreview, setRecPreview] = useState(null);
   const [recLoading, setRecLoading] = useState(false);
-  /** Which product's tag filters are shown in Discover when multiple products are selected */
-  const [discoverCapabilityProduct, setDiscoverCapabilityProduct] = useState(DEFAULT_PRODUCT_KEY);
-
   const [searchResults, setSearchResults] = useState([]);
   const [savedRows, setSavedRows] = useState([]);
   const [universeRows, setUniverseRows] = useState([]);
   const [universeTotal, setUniverseTotal] = useState(0);
+  const [rejectedRows, setRejectedRows] = useState([]);
+  const [rejectedTotal, setRejectedTotal] = useState(0);
+  const [selectedDeletedAnchorIds, setSelectedDeletedAnchorIds] = useState([]);
+  const [similarMatches, setSimilarMatches] = useState([]);
+  const [similarModalOpen, setSimilarModalOpen] = useState(false);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarMinScore, setSimilarMinScore] = useState(0.84);
+  const [selectedSimilarIds, setSelectedSimilarIds] = useState([]);
+  const [bulkRejectLoading, setBulkRejectLoading] = useState(false);
+  const [restoreSelectedLoading, setRestoreSelectedLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [searchDone, setSearchDone] = useState(false);
   const [searchError, setSearchError] = useState("");
@@ -255,23 +190,101 @@ export default function CompanySourcingTool() {
   const [thesisRequireProprietary, setThesisRequireProprietary] = useState(false);
   const [thesisRequireFounderVintage, setThesisRequireFounderVintage] = useState(false);
   const [minOwnershipConfidence, setMinOwnershipConfidence] = useState(0);
+  const [allowedCountryCodes, setAllowedCountryCodes] = useState(() => [...DEFAULT_ALLOWED_COUNTRY_CODES]);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+  const [universeFilterDrawerOpen, setUniverseFilterDrawerOpen] = useState(false);
+  const [universeSidebarSection, setUniverseSidebarSection] = useState("vertical");
+  const [universeSelectedProducts, setUniverseSelectedProducts] = useState([]);
+  const [universeSelectedVerticals, setUniverseSelectedVerticals] = useState([]);
+  const [universeOwnershipFilter, setUniverseOwnershipFilter] = useState("Any Ownership");
+  const [universeCompanyTypeFilter, setUniverseCompanyTypeFilter] = useState("Any Type");
+  const [universeRevenueFilter, setUniverseRevenueFilter] = useState("Any Revenue");
+  const [universeSizeFilter, setUniverseSizeFilter] = useState("Any Size");
+  const [universeFoundedFilter, setUniverseFoundedFilter] = useState("Any Era");
+  const [universeThesisRequireMissionCritical, setUniverseThesisRequireMissionCritical] = useState(false);
+  const [universeThesisRequireVertIntegrated, setUniverseThesisRequireVertIntegrated] = useState(false);
+  const [universeThesisRequireProprietary, setUniverseThesisRequireProprietary] = useState(false);
+  const [universeThesisRequireFounderVintage, setUniverseThesisRequireFounderVintage] = useState(false);
+  const [universeMinOwnershipConfidence, setUniverseMinOwnershipConfidence] = useState(0);
+  const [universeAllowedCountryCodes, setUniverseAllowedCountryCodes] = useState(() => [...DEFAULT_ALLOWED_COUNTRY_CODES]);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [savedContactExpanded, setSavedContactExpanded] = useState({});
   const resultsFilterInputRef = useRef(null);
   const { theme, toggleTheme } = useTheme();
 
-  const activeProduct = selectedProducts[0] || DEFAULT_PRODUCT_KEY;
+  const activeProduct = selectedProducts[0] ?? null;
 
-  useEffect(() => {
-    setDiscoverCapabilityProduct((prev) =>
-      selectedProducts.includes(prev) ? prev : selectedProducts[0] || DEFAULT_PRODUCT_KEY
-    );
-  }, [selectedProducts]);
+  const discoverCriteriaForPredicate = useMemo(
+    () => ({
+      ownershipFilter,
+      companyTypeFilter,
+      revenueFilter,
+      sizeFilter,
+      foundedFilter,
+      thesisRequireMissionCritical,
+      thesisRequireVertIntegrated,
+      thesisRequireProprietary,
+      thesisRequireFounderVintage,
+      minOwnershipConfidence,
+      allowedCountryCodes,
+      selectedVerticals,
+      selectedProducts,
+      selectedTags: [],
+      strictVerticalFit,
+    }),
+    [
+      ownershipFilter,
+      companyTypeFilter,
+      revenueFilter,
+      sizeFilter,
+      foundedFilter,
+      thesisRequireMissionCritical,
+      thesisRequireVertIntegrated,
+      thesisRequireProprietary,
+      thesisRequireFounderVintage,
+      minOwnershipConfidence,
+      allowedCountryCodes,
+      selectedVerticals,
+      selectedProducts,
+      strictVerticalFit,
+    ],
+  );
 
-  const capabilityFocusProduct = selectedProducts.includes(discoverCapabilityProduct)
-    ? discoverCapabilityProduct
-    : selectedProducts[0] || DEFAULT_PRODUCT_KEY;
+  const universeCriteriaForPredicate = useMemo(
+    () => ({
+      ownershipFilter: universeOwnershipFilter,
+      companyTypeFilter: universeCompanyTypeFilter,
+      revenueFilter: universeRevenueFilter,
+      sizeFilter: universeSizeFilter,
+      foundedFilter: universeFoundedFilter,
+      thesisRequireMissionCritical: universeThesisRequireMissionCritical,
+      thesisRequireVertIntegrated: universeThesisRequireVertIntegrated,
+      thesisRequireProprietary: universeThesisRequireProprietary,
+      thesisRequireFounderVintage: universeThesisRequireFounderVintage,
+      minOwnershipConfidence: universeMinOwnershipConfidence,
+      allowedCountryCodes: universeAllowedCountryCodes,
+      selectedVerticals: universeSelectedVerticals,
+      selectedProducts: universeSelectedProducts,
+      selectedTags: [],
+      strictVerticalFit,
+    }),
+    [
+      universeOwnershipFilter,
+      universeCompanyTypeFilter,
+      universeRevenueFilter,
+      universeSizeFilter,
+      universeFoundedFilter,
+      universeThesisRequireMissionCritical,
+      universeThesisRequireVertIntegrated,
+      universeThesisRequireProprietary,
+      universeThesisRequireFounderVintage,
+      universeMinOwnershipConfidence,
+      universeAllowedCountryCodes,
+      universeSelectedVerticals,
+      universeSelectedProducts,
+      strictVerticalFit,
+    ],
+  );
 
   useEffect(() => {
     localStorage.setItem("sourcingCompanyMeta", JSON.stringify(companyMeta));
@@ -318,7 +331,7 @@ export default function CompanySourcingTool() {
   const applyRecommendationPreview = () => {
     if (!recPreview?.ok || !Array.isArray(recPreview.selectedVerticals)) return;
     setSelectedVerticals(recPreview.selectedVerticals);
-    const hinted = (recPreview.matchedProductHints || []).filter((x) => Object.keys(SOFTWARE_PRODUCTS).includes(String(x)));
+    const hinted = (recPreview.matchedProductHints || []).filter((x) => SOFTWARE_PRODUCT_KEYS.includes(String(x)));
     if (hinted.length) setSelectedProducts(hinted);
     pendingDiscoveryBoostRef.current = {
       additionalSearchQueries: [...(recPreview.additionalSearchQueries || [])],
@@ -336,38 +349,102 @@ export default function CompanySourcingTool() {
       .catch(() => setSavedRows([]));
   }, []);
 
-  const loadUniverseRows = useCallback(() => {
-    fetch("/api/universe?limit=500&offset=0")
-      .then((r) => r.json())
-      .then((d) => {
+  const fetchUniverseFirstPage = useCallback(
+    async (signal) => {
+      const criteria = { ...universeCriteriaForPredicate, textQuery: "" };
+      try {
+        const r = await fetch("/api/universe/query", {
+          method: "POST",
+          signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ criteria, offset: 0, limit: 500 }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.ok === false) {
+          setUniverseRows([]);
+          setUniverseTotal(0);
+          return;
+        }
         setUniverseRows(d.companies || []);
-        setUniverseTotal(d.total || 0);
-      })
-      .catch(() => {
+        setUniverseTotal(d.total ?? 0);
+      } catch (e) {
+        if (e?.name === "AbortError") return;
         setUniverseRows([]);
         setUniverseTotal(0);
-      });
-  }, []);
+      }
+    },
+    [universeCriteriaForPredicate],
+  );
+
+  const loadUniverseRows = useCallback(() => {
+    fetchUniverseFirstPage();
+  }, [fetchUniverseFirstPage]);
 
   const loadMoreUniverse = useCallback(() => {
     const offset = universeRows.length;
-    fetch(`/api/universe?limit=500&offset=${offset}`)
+    const criteria = { ...universeCriteriaForPredicate, textQuery: "" };
+    fetch("/api/universe/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ criteria, offset, limit: 500 }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!r.ok || d.ok === false) return;
+        const next = d.companies || [];
+        setUniverseRows((prev) => [...prev, ...next]);
+        setUniverseTotal(d.total ?? 0);
+      })
+      .catch(() => {});
+  }, [universeRows.length, universeCriteriaForPredicate]);
+
+  const loadRejectedRows = useCallback(() => {
+    fetch("/api/universe?rejectedOnly=1&limit=500&offset=0")
+      .then((r) => r.json())
+      .then((d) => {
+        setRejectedRows(d.companies || []);
+        setRejectedTotal(d.total || 0);
+      })
+      .catch(() => {
+        setRejectedRows([]);
+        setRejectedTotal(0);
+      });
+  }, []);
+
+  const loadMoreRejected = useCallback(() => {
+    const offset = rejectedRows.length;
+    fetch(`/api/universe?rejectedOnly=1&limit=500&offset=${offset}`)
       .then((r) => r.json())
       .then((d) => {
         const next = d.companies || [];
-        setUniverseRows((prev) => [...prev, ...next]);
-        setUniverseTotal(d.total || 0);
+        setRejectedRows((prev) => [...prev, ...next]);
+        setRejectedTotal(d.total || 0);
       })
       .catch(() => {});
-  }, [universeRows.length]);
+  }, [rejectedRows.length]);
+
+  const refreshRejectedTotal = useCallback(() => {
+    fetch("/api/universe?rejectedOnly=1&limit=1&offset=0")
+      .then((r) => r.json())
+      .then((d) => setRejectedTotal(d.total || 0))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     loadSavedRows();
-  }, [loadSavedRows]);
+    refreshRejectedTotal();
+  }, [loadSavedRows, refreshRejectedTotal]);
 
   useEffect(() => {
-    if (activeTab === "universe") loadUniverseRows();
-  }, [activeTab, loadUniverseRows]);
+    if (activeTab !== "universe") return undefined;
+    const ac = new AbortController();
+    fetchUniverseFirstPage(ac.signal);
+    return () => ac.abort();
+  }, [activeTab, fetchUniverseFirstPage]);
+
+  useEffect(() => {
+    if (activeTab === "deleted") loadRejectedRows();
+  }, [activeTab, loadRejectedRows]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -383,19 +460,11 @@ export default function CompanySourcingTool() {
   const toggleSavedContact = (id) =>
     setSavedContactExpanded((p) => ({ ...p, [id]: !p[id] }));
 
-  const toggleTag = (productName, group, tag) =>
-    setSelectedTagsByProduct((prev) => {
-      const prod = prev[productName] || {};
-      const c = prod[group] || [];
-      const nextTags = c.includes(tag) ? c.filter((t) => t !== tag) : [...c, tag];
-      return { ...prev, [productName]: { ...prod, [group]: nextTags } };
-    });
-
-  const allSelectedTags = selectedProducts.flatMap((p) =>
-    Object.values(selectedTagsByProduct[p] || {}).flat()
-  );
   const toggleVertical = (v) =>
     setSelectedVerticals((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
+
+  const toggleUniverseVertical = (v) =>
+    setUniverseSelectedVerticals((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
 
   const updateMeta = (id,field,val) => setCompanyMeta(prev=>({...prev,[id]:{...(prev[id]||defaultMeta()),[field]:val}}));
 
@@ -437,6 +506,147 @@ export default function CompanySourcingTool() {
     }
   };
 
+  const setCompanyRejected = async (id, rejected) => {
+    try {
+      const r = await fetch(`/api/companies/${id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rejected }),
+      });
+      const updated = await r.json();
+      setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+      if (rejected) {
+        setExpandedCompany((e) => (e === id ? null : e));
+        setCompanyMeta((p) => {
+          const n = { ...p };
+          delete n[id];
+          return n;
+        });
+      }
+      loadSavedRows();
+      loadUniverseRows();
+      refreshRejectedTotal();
+      if (activeTab === "deleted") loadRejectedRows();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const toggleDeletedAnchor = (id) => {
+    setSelectedDeletedAnchorIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const runSimilarToRejected = async () => {
+    if (!selectedDeletedAnchorIds.length) return;
+    setSimilarLoading(true);
+    setSelectedSimilarIds([]);
+    try {
+      const r = await fetch("/api/universe/similar-to-rejected", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          anchorIds: selectedDeletedAnchorIds,
+          limit: 100,
+          minScore: similarMinScore,
+        }),
+      });
+      const d = await r.json();
+      const matches = d.matches || [];
+      setSimilarMatches(matches);
+      setSimilarModalOpen(true);
+    } catch {
+      setSimilarMatches([]);
+    } finally {
+      setSimilarLoading(false);
+    }
+  };
+
+  const toggleSimilarSelected = (id) => {
+    setSelectedSimilarIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const bulkRejectSimilarSelected = async () => {
+    if (!selectedSimilarIds.length) return;
+    setBulkRejectLoading(true);
+    try {
+      const r = await fetch("/api/companies/bulk-reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedSimilarIds }),
+      });
+      await r.json();
+      setSelectedSimilarIds([]);
+      setSimilarModalOpen(false);
+      setSimilarMatches([]);
+      loadSavedRows();
+      loadUniverseRows();
+      refreshRejectedTotal();
+      loadRejectedRows();
+    } catch {
+      /* ignore */
+    } finally {
+      setBulkRejectLoading(false);
+    }
+  };
+
+  const restoreSelectedFromDeleted = async () => {
+    const ids = [...new Set(selectedDeletedAnchorIds.map((x) => Number(x)).filter(Number.isFinite))];
+    if (!ids.length) return;
+    const n = ids.length;
+    if (
+      !window.confirm(
+        `Restore ${n} selected ${n === 1 ? "company" : "companies"} to the active universe?`
+      )
+    ) {
+      return;
+    }
+    setRestoreSelectedLoading(true);
+    try {
+      const r = await fetch("/api/companies/bulk-restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      let d = {};
+      try {
+        d = await r.json();
+      } catch {
+        window.alert("Restore failed: could not read server response. Is the API running?");
+        return;
+      }
+      if (!r.ok) {
+        window.alert(d.message || `Restore failed (HTTP ${r.status}).`);
+        return;
+      }
+      if (!d.ok) {
+        window.alert(d.message || "Restore was not applied.");
+        return;
+      }
+      const restored = new Set(ids);
+      setSelectedDeletedAnchorIds([]);
+      setSearchResults((prev) =>
+        prev.map((c) => (restored.has(c.id) ? { ...c, is_rejected: false } : c))
+      );
+      loadSavedRows();
+      loadUniverseRows();
+      refreshRejectedTotal();
+      loadRejectedRows();
+      if (typeof d.restoredCount === "number" && d.restoredCount === 0 && n > 0) {
+        window.alert(
+          "No rows were updated. Those companies may already be active, or IDs may be out of sync. Try Refresh on this tab."
+        );
+      }
+    } catch (e) {
+      window.alert(e?.message || "Restore failed.");
+    } finally {
+      setRestoreSelectedLoading(false);
+    }
+  };
+
   const thesisFilterCount =
     (thesisRequireMissionCritical ? 1 : 0) +
     (thesisRequireVertIntegrated ? 1 : 0) +
@@ -445,17 +655,37 @@ export default function CompanySourcingTool() {
     (minOwnershipConfidence > 0 ? 1 : 0);
 
   const activeFilterCount =
-    allSelectedTags.length +
     selectedVerticals.length +
+    selectedProducts.length +
+    (strictVerticalFit ? 1 : 0) +
     (ownershipFilter !== "Any Ownership" ? 1 : 0) +
     (companyTypeFilter !== "Any Type" ? 1 : 0) +
     (revenueFilter !== "Any Revenue" ? 1 : 0) +
     (sizeFilter !== "Any Size" ? 1 : 0) +
     (foundedFilter !== "Any Era" ? 1 : 0) +
-    thesisFilterCount;
+    thesisFilterCount +
+    (allowedCountryCodes.length > 0 ? 1 : 0);
+
+  const universeThesisFilterCount =
+    (universeThesisRequireMissionCritical ? 1 : 0) +
+    (universeThesisRequireVertIntegrated ? 1 : 0) +
+    (universeThesisRequireProprietary ? 1 : 0) +
+    (universeThesisRequireFounderVintage ? 1 : 0) +
+    (universeMinOwnershipConfidence > 0 ? 1 : 0);
+
+  const universeActiveFilterCount =
+    universeSelectedVerticals.length +
+    universeSelectedProducts.length +
+    (strictVerticalFit ? 1 : 0) +
+    (universeOwnershipFilter !== "Any Ownership" ? 1 : 0) +
+    (universeCompanyTypeFilter !== "Any Type" ? 1 : 0) +
+    (universeRevenueFilter !== "Any Revenue" ? 1 : 0) +
+    (universeSizeFilter !== "Any Size" ? 1 : 0) +
+    (universeFoundedFilter !== "Any Era" ? 1 : 0) +
+    universeThesisFilterCount +
+    (universeAllowedCountryCodes.length > 0 ? 1 : 0);
 
   const clearAll = () => {
-    setSelectedTagsByProduct({});
     setSelectedVerticals([]);
     setOwnershipFilter("Any Ownership");
     setCompanyTypeFilter("Any Type");
@@ -467,6 +697,22 @@ export default function CompanySourcingTool() {
     setThesisRequireProprietary(false);
     setThesisRequireFounderVintage(false);
     setMinOwnershipConfidence(0);
+    setAllowedCountryCodes([]);
+  };
+
+  const clearAllUniverse = () => {
+    setUniverseSelectedVerticals([]);
+    setUniverseOwnershipFilter("Any Ownership");
+    setUniverseCompanyTypeFilter("Any Type");
+    setUniverseRevenueFilter("Any Revenue");
+    setUniverseSizeFilter("Any Size");
+    setUniverseFoundedFilter("Any Era");
+    setUniverseThesisRequireMissionCritical(false);
+    setUniverseThesisRequireVertIntegrated(false);
+    setUniverseThesisRequireProprietary(false);
+    setUniverseThesisRequireFounderVintage(false);
+    setUniverseMinOwnershipConfidence(0);
+    setUniverseAllowedCountryCodes([]);
   };
 
   const applyIdealProfile = () => {
@@ -487,7 +733,29 @@ export default function CompanySourcingTool() {
     setMinOwnershipConfidence(0);
   };
 
+  const applyIdealProfileUniverse = () => {
+    setUniverseFoundedFilter("Before 2017 (ideal)");
+    setUniverseSizeFilter("15-100 (ideal)");
+    setUniverseRevenueFilter("$2M-$10M (ideal)");
+    setUniverseThesisRequireProprietary(true);
+    setUniverseThesisRequireMissionCritical(true);
+    setUniverseMinOwnershipConfidence(0.5);
+  };
+
+  const resetIdealProfileUniverse = () => {
+    setUniverseFoundedFilter("Any Era");
+    setUniverseSizeFilter("Any Size");
+    setUniverseRevenueFilter("Any Revenue");
+    setUniverseThesisRequireProprietary(false);
+    setUniverseThesisRequireMissionCritical(false);
+    setUniverseMinOwnershipConfidence(0);
+  };
+
   const runSearch = async (findMore = false) => {
+    if (selectedProducts.length === 0) {
+      setSearchError("Select at least one software category under Filters → Product before searching.");
+      return;
+    }
     setSearching(true);
     setSearchDone(false);
     setSearchError("");
@@ -502,8 +770,8 @@ export default function CompanySourcingTool() {
       const payload = {
         activeProduct,
         selectedProducts,
-        selectedTagsByProduct,
-        selectedTags: allSelectedTags,
+        selectedTagsByProduct: {},
+        selectedTags: [],
         selectedVerticals,
         ownershipFilter,
         revenueFilter,
@@ -514,6 +782,7 @@ export default function CompanySourcingTool() {
         breadth,
         settings: { llmProvider },
         strictVerticalFit,
+        allowedCountries: allowedCountryCodes,
         thesis: {
           requireMissionCritical: thesisRequireMissionCritical,
           requireVerticallyIntegrated: thesisRequireVertIntegrated,
@@ -761,6 +1030,12 @@ export default function CompanySourcingTool() {
         action: () => setActiveTab("universe"),
       },
       {
+        id: "deleted",
+        label: "Go to Deleted",
+        group: "Navigate",
+        action: () => setActiveTab("deleted"),
+      },
+      {
         id: "focus-results",
         label: "Focus results search",
         group: "Discover",
@@ -794,43 +1069,17 @@ export default function CompanySourcingTool() {
         action: () => exportToExcel(),
       },
     ],
-    [searching, searchResults.length, theme, toggleTheme, runSearch, exportToExcel],
+    [searching, searchResults.length, selectedProducts.length, theme, toggleTheme, runSearch, exportToExcel],
   );
 
   const displayedResults = searchResults
-    .filter((c) => {
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        if (
-          !c.name.toLowerCase().includes(q) &&
-          !(c.description || "").toLowerCase().includes(q) &&
-          !(c.verticals || []).some((v) => v.toLowerCase().includes(q)) &&
-          !(c.searchVerticals || []).some((v) => String(v).toLowerCase().includes(q)) &&
-          !(c.verticalFitReasons || []).some((s) => String(s).toLowerCase().includes(q)) &&
-          !(c.sourceTags || []).some((s) => String(s).toLowerCase().includes(q)) &&
-          !(c.matchedProducts || []).some((p) => String(p).toLowerCase().includes(q))
-        )
-          return false;
-      }
-      if (ownershipFilter !== "Any Ownership") {
-        const oc = c.ownership_class || c.ownership;
-        if (oc !== ownershipFilter) return false;
-      }
-      if (!matchesCompanyTypeFilter(c, companyTypeFilter)) return false;
-      if (revenueFilter !== "Any Revenue" && !matchesRevenueFilter(c, revenueFilter)) return false;
-      if (sizeFilter !== "Any Size" && !matchesEmployeeFilter(c, sizeFilter)) return false;
-      if (!inFoundedEra(c.foundedYear, foundedFilter)) return false;
-      if (thesisRequireMissionCritical && !c.missionCritical) return false;
-      if (thesisRequireVertIntegrated && !c.verticallyIntegrated) return false;
-      if (thesisRequireProprietary && !c.proprietaryStack) return false;
-      if (
-        thesisRequireFounderVintage &&
-        !["Founder-Operated", "Vintage PE"].includes(c.ownership_class || "")
-      )
-        return false;
-      if (minOwnershipConfidence > 0 && (c.ownership_confidence || 0) < minOwnershipConfidence) return false;
-      return true;
-    })
+    .filter((c) =>
+      companyPassesDiscoverFilters(c, {
+        ...discoverCriteriaForPredicate,
+        textQuery: searchQuery,
+        excludeRejected: true,
+      }),
+    )
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   return (
@@ -854,6 +1103,7 @@ export default function CompanySourcingTool() {
               ["discover", "Discover"],
               ["saved", `Saved (${savedRows.length})`],
               ["universe", `Universe (${universeTotal})`],
+              ["deleted", `Deleted (${rejectedTotal})`],
             ].map(([id, lbl]) => (
               <button
                 key={id}
@@ -923,7 +1173,8 @@ export default function CompanySourcingTool() {
                     <button
                       type="button"
                       onClick={() => runSearch(false)}
-                      disabled={searching}
+                      disabled={searching || selectedProducts.length === 0}
+                      title={selectedProducts.length === 0 ? "Choose at least one software category in Filters → Product" : undefined}
                       className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-5 py-2.5 text-ui font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {searching ? (
@@ -950,7 +1201,7 @@ export default function CompanySourcingTool() {
                     <button
                       type="button"
                       onClick={() => runSearch(true)}
-                      disabled={searching || !searchResults.length}
+                      disabled={searching || !searchResults.length || selectedProducts.length === 0}
                       className="rounded-md border border-border bg-background px-4 py-2.5 text-ui font-medium text-foreground shadow-sm transition-colors hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-40"
                       title="Exclude current domains and run again"
                     >
@@ -1070,20 +1321,32 @@ export default function CompanySourcingTool() {
                                     </a>
                                   )}
                                 </div>
-                                <button
-                                  type="button"
-                                  className={`shrink-0 rounded-md border px-3 py-1 text-data font-medium transition-colors ${
-                                    isSaved
-                                      ? "border-primary/40 bg-primary/10 text-primary"
-                                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                                  }`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    saveCompany(c.id, !isSaved);
-                                  }}
-                                >
-                                  {isSaved ? "Saved" : "Save"}
-                                </button>
+                                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    className="rounded-md border border-destructive/40 px-3 py-1 text-data font-medium text-destructive hover:bg-destructive/10"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCompanyRejected(c.id, true);
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`rounded-md border px-3 py-1 text-data font-medium transition-colors ${
+                                      isSaved
+                                        ? "border-primary/40 bg-primary/10 text-primary"
+                                        : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    }`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      saveCompany(c.id, !isSaved);
+                                    }}
+                                  >
+                                    {isSaved ? "Saved" : "Save"}
+                                  </button>
+                                </div>
                               </div>
                               <p className="text-data text-muted-foreground">
                                 MC:{c.missionCritical ? "Y" : "N"} · VI:{c.verticallyIntegrated ? "Y" : "N"} · Prop:
@@ -1469,9 +1732,21 @@ export default function CompanySourcingTool() {
 
           {activeTab === "universe" && (
             <div className="animate-in-fade space-y-4">
-              <p className="text-data text-muted-foreground">
-                All companies in <code>universe.db</code> ({universeTotal} total, showing {universeRows.length}).
-              </p>
+              <div className="space-y-2">
+                <p className="max-w-2xl text-data text-muted-foreground">
+                  Active universe in <code>universe.db</code> (not deleted). Use filters to narrow this list. Showing{" "}
+                  {universeRows.length} of {universeTotal} matching.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setUniverseFilterDrawerOpen(true)}
+                  className="text-left text-data text-primary hover:underline"
+                >
+                  {universeActiveFilterCount === 0
+                    ? "No filters applied · Add filters"
+                    : `${universeActiveFilterCount} filter${universeActiveFilterCount === 1 ? "" : "s"} active · Edit filters`}
+                </button>
+              </div>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -1494,365 +1769,443 @@ export default function CompanySourcingTool() {
                 {universeRows.map((c) => {
                   const ownLabel = c.ownership_class || c.ownership;
                   const ownCls = ownerBadgeClasses(ownLabel);
+                  const scoreRaw = c.score ?? c.thesisScore;
+                  const scoreCls = scoreTierClasses(scoreRaw);
+                  const ctBad = companyTypeBadge(c.companyType);
+                  const productPills = c.matchedProducts || c.products || [];
                   return (
                     <div
                       key={c.id}
                       className="rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/25"
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="font-semibold text-foreground">{c.name}</span>
-                          {ownLabel && (
-                            <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
-                          )}
-                          {c.is_saved && <span className="text-data font-medium text-primary">saved</span>}
-                          <span className="truncate text-data text-muted-foreground">{c.domain}</span>
+                      <div className="flex gap-3">
+                        <div
+                          className={`flex size-9 shrink-0 items-center justify-center rounded-full border text-data font-semibold ${scoreCls}`}
+                        >
+                          {scoreRaw ?? "—"}
                         </div>
-                        <div className="flex gap-2">
-                          <a
-                            className="rounded-md border border-border px-3 py-1.5 text-data text-primary hover:bg-muted"
-                            href={c.website}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            Site
-                          </a>
-                          <button
-                            type="button"
-                            onClick={() => saveCompany(c.id, !c.is_saved)}
-                            className="rounded-md border border-border px-3 py-1.5 text-data font-medium hover:bg-muted"
-                          >
-                            {c.is_saved ? "Unsave" : "Save"}
-                          </button>
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <span className="text-ui font-semibold text-foreground">{c.name}</span>
+                              {ownLabel && (
+                                <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
+                              )}
+                              <span
+                                title={`Company type: ${(c.companyType || "unknown").toLowerCase()}`}
+                                className={`rounded border px-2 py-0.5 text-data ${ctBad.cls}`}
+                              >
+                                {ctBad.lbl}
+                              </span>
+                              {c.classificationSource && (
+                                <span className="text-data text-muted-foreground">{c.classificationSource}</span>
+                              )}
+                              {c.foundedYear && (
+                                <span className="text-data text-muted-foreground">Est. {c.foundedYear}</span>
+                              )}
+                              {c.is_saved && <span className="text-data font-medium text-primary">saved</span>}
+                              <span className="truncate text-data text-muted-foreground">{c.domain}</span>
+                              {c.website && (
+                                <a
+                                  className={`${pillBase} border-border text-primary`}
+                                  href={c.website}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  Website
+                                </a>
+                              )}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setCompanyRejected(c.id, true)}
+                                className="rounded-md border border-destructive/40 px-3 py-1.5 text-data font-medium text-destructive hover:bg-destructive/10"
+                              >
+                                Delete
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveCompany(c.id, !c.is_saved)}
+                                className="rounded-md border border-border px-3 py-1.5 text-data font-medium hover:bg-muted"
+                              >
+                                {c.is_saved ? "Unsave" : "Save"}
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-data text-muted-foreground">
+                            MC:{c.missionCritical ? "Y" : "N"} · VI:{c.verticallyIntegrated ? "Y" : "N"} · Prop:
+                            {c.proprietaryStack ? "Y" : "N"}
+                            {typeof c.ownership_confidence === "number" && (
+                              <span className="ms-2">conf {c.ownership_confidence.toFixed(2)}</span>
+                            )}
+                          </p>
+                          {c.description && (
+                            <p className="text-data leading-relaxed text-muted-foreground">{c.description}</p>
+                          )}
+                          <div className="flex flex-wrap gap-1.5">
+                            {(c.sourceTags || []).map((s) => (
+                              <span
+                                key={s}
+                                className={`${pillBase} border-emerald-500/30 bg-emerald-500/5 text-emerald-900 dark:text-emerald-100`}
+                              >
+                                {s}
+                              </span>
+                            ))}
+                            {(c.verticals || []).length > 0 ? (
+                              (c.verticals || []).map((v) => (
+                                <span
+                                  key={v}
+                                  className={`${pillBase} border-amber-500/30 bg-amber-500/5 text-amber-900 dark:text-amber-100`}
+                                >
+                                  {v}
+                                </span>
+                              ))
+                            ) : (c.searchVerticals || []).length > 0 ? (
+                              <span
+                                className={`${pillBase} border-muted-foreground/30 bg-muted/40 text-muted-foreground`}
+                              >
+                                No scraped industry match
+                                {typeof c.verticalFitScore === "number" ? ` (${c.verticalFitScore})` : ""}
+                              </span>
+                            ) : null}
+                            {productPills.map((mp) => (
+                              <span
+                                key={mp}
+                                className={`${pillBase} border-violet-500/30 bg-violet-500/5 text-violet-900 dark:text-violet-100`}
+                              >
+                                {mp}
+                              </span>
+                            ))}
+                            {(c.tags || []).map((t) => (
+                              <span key={t} className={`${pillBase} border-border bg-muted/50 text-muted-foreground`}>
+                                {t}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </div>
-                      <p className="mt-2 text-data text-muted-foreground">
-                        Score {(c.score ?? c.thesisScore) || "—"} · {(c.sourceTags || []).join(" · ")}
-                      </p>
                     </div>
                   );
                 })}
               </div>
             </div>
           )}
+
+          {activeTab === "deleted" && (
+            <div className="animate-in-fade space-y-4">
+              <p className="text-data text-muted-foreground">
+                Companies you <span className="text-foreground">delete</span> stay here. Use them as anchors to find
+                similar names still in the active universe, then bulk-reject matches.
+              </p>
+              <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-card p-3 shadow-sm">
+                <div className="min-w-0 flex-1 space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground" htmlFor="similar-min">
+                    Min similarity (0–1)
+                  </label>
+                  <input
+                    id="similar-min"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    max={1}
+                    value={similarMinScore}
+                    onChange={(e) => setSimilarMinScore(parseFloat(e.target.value) || 0)}
+                    className="w-full max-w-[8rem] rounded-md border border-border bg-background px-2 py-1.5 text-data text-foreground"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={!selectedDeletedAnchorIds.length || similarLoading}
+                  onClick={runSimilarToRejected}
+                  className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-data font-semibold text-primary hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {similarLoading ? "…" : "Find similar in universe"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={loadRejectedRows}
+                  className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
+                >
+                  Refresh
+                </button>
+                {rejectedRows.length < rejectedTotal && (
+                  <button
+                    type="button"
+                    onClick={loadMoreRejected}
+                    className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
+                  >
+                    Load more
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={!rejectedRows.length}
+                  onClick={() => setSelectedDeletedAnchorIds(rejectedRows.map((c) => c.id))}
+                  className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedDeletedAnchorIds.length}
+                  onClick={() => setSelectedDeletedAnchorIds([])}
+                  className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Clear selection
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedDeletedAnchorIds.length || restoreSelectedLoading}
+                  onClick={restoreSelectedFromDeleted}
+                  className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-data font-semibold text-primary shadow-sm hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {restoreSelectedLoading ? "…" : "Restore selected"}
+                </button>
+              </div>
+              <div className="flex flex-col gap-3">
+                {rejectedRows.length === 0 ? (
+                  <p className="text-data text-muted-foreground">No deleted companies.</p>
+                ) : (
+                  rejectedRows.map((c) => {
+                    const checked = selectedDeletedAnchorIds.includes(c.id);
+                    const ownLabel = c.ownership_class || c.ownership;
+                    const ownCls = ownerBadgeClasses(ownLabel);
+                    return (
+                      <div
+                        key={c.id}
+                        className="rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/25"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleDeletedAnchor(c.id)}
+                              className="size-4 shrink-0 rounded border-border"
+                              title="Use as anchor for similarity search"
+                              aria-label={`Select ${c.name} as anchor`}
+                            />
+                            <span className="font-semibold text-foreground">{c.name}</span>
+                            {ownLabel && (
+                              <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
+                            )}
+                            <span className="truncate text-data text-muted-foreground">{c.domain}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {c.website && (
+                              <a
+                                className="rounded-md border border-border px-3 py-1.5 text-data text-primary hover:bg-muted"
+                                href={c.website}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                Site
+                              </a>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setCompanyRejected(c.id, false)}
+                              className="rounded-md border border-border px-3 py-1.5 text-data font-medium text-primary hover:bg-muted"
+                            >
+                              Restore
+                            </button>
+                          </div>
+                        </div>
+                        <p className="mt-2 text-data text-muted-foreground">
+                          Score {(c.score ?? c.thesisScore) || "—"} · {(c.sourceTags || []).join(" · ")}
+                        </p>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
-      <FilterDrawer open={filterDrawerOpen} onClose={() => setFilterDrawerOpen(false)}>
-        <div className="mb-4 flex gap-0 border-b border-border">
-          {[
-            ["vertical", "Vertical"],
-            ["product", "Product"],
-            ["company", "Company"],
-            ["tags", "Tags"],
-          ].map(([id, lbl]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setSidebarSection(id)}
-              className={`flex-1 border-b-2 py-2.5 text-data font-semibold uppercase tracking-wide transition-colors ${
-                sidebarSection === id
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {lbl}
-            </button>
-          ))}
-        </div>
-
-        {sidebarSection === "vertical" && (
-          <div className="space-y-3 animate-in-fade">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Industry verticals</p>
-            <div className="flex flex-col gap-2">
-              {VERTICALS.map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => toggleVertical(v)}
-                  className={`flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-data transition-colors ${
-                    selectedVerticals.includes(v)
-                      ? "border-primary/50 bg-primary/10 text-foreground"
-                      : "border-border text-muted-foreground hover:border-muted-foreground/40"
-                  }`}
-                >
-                  <span style={{ opacity: selectedVerticals.includes(v) ? 1 : 0 }} className="w-3 shrink-0">
-                    ✓
-                  </span>
-                  {v}
-                </button>
-              ))}
+      {similarModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-background/80 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="similar-modal-title"
+        >
+          <div className="max-h-[85vh] w-full max-w-lg overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+            <div className="border-b border-border px-4 py-3">
+              <h2 id="similar-modal-title" className="text-ui font-semibold text-foreground">
+                Similar companies in universe
+              </h2>
+              <p className="mt-1 text-data text-muted-foreground">
+                Select rows to move to Deleted.
+              </p>
             </div>
-            {selectedVerticals.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setSelectedVerticals([])}
-                className="w-full rounded-md border border-border py-2 text-data text-muted-foreground hover:bg-muted"
-              >
-                Clear ({selectedVerticals.length})
-              </button>
-            )}
-          </div>
-        )}
-
-        {sidebarSection === "product" && (
-          <div className="space-y-3 animate-in-fade">
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedProducts(Object.keys(SOFTWARE_PRODUCTS))}
-                className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
-              >
-                Select all
-              </button>
+            <div className="max-h-[50vh] overflow-y-auto p-2">
+              {similarMatches.length === 0 ? (
+                <p className="px-2 py-6 text-center text-data text-muted-foreground">No matches at this threshold.</p>
+              ) : (
+                <ul className="space-y-1">
+                  {similarMatches.map((m) => {
+                    const on = selectedSimilarIds.includes(m.id);
+                    return (
+                      <li key={m.id}>
+                        <label className="flex cursor-pointer items-center gap-3 rounded-md border border-transparent px-2 py-2 hover:bg-muted/50">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => toggleSimilarSelected(m.id)}
+                            className="size-4 shrink-0 rounded border-border"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="font-medium text-foreground">{m.name}</span>
+                            <span className="ms-2 truncate text-data text-muted-foreground">{m.domain}</span>
+                          </span>
+                          <span className="shrink-0 tabular-nums text-data text-muted-foreground">
+                            {(m.score * 100).toFixed(1)}%
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border p-3">
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedProducts([DEFAULT_PRODUCT_KEY]);
-                  setSelectedTagsByProduct({});
+                  setSimilarModalOpen(false);
+                  setSimilarMatches([]);
+                  setSelectedSimilarIds([]);
                 }}
-                className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
+                className="rounded-md border border-border px-3 py-2 text-data font-medium hover:bg-muted"
               >
-                Clear
+                Close
               </button>
-            </div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Software type</p>
-            <div className="flex flex-col border-t border-border">
-              {Object.entries(SOFTWARE_PRODUCTS).map(([name, data]) => {
-                const on = selectedProducts.includes(name);
-                return (
-                  <button
-                    key={name}
-                    type="button"
-                    title={data.description}
-                    onClick={() => {
-                      setSelectedProducts((prev) => {
-                        if (prev.includes(name)) {
-                          const next = prev.filter((x) => x !== name);
-                          return next.length ? next : [DEFAULT_PRODUCT_KEY];
-                        }
-                        return [...prev, name];
-                      });
-                    }}
-                    className={`flex w-full items-center gap-2 border-l-2 py-2.5 ps-3 text-left text-data transition-colors ${
-                      on
-                        ? "border-primary bg-primary/5 text-foreground"
-                        : "border-transparent text-muted-foreground hover:border-muted-foreground/30 hover:text-foreground"
-                    }`}
-                  >
-                    <span className="w-3 shrink-0" style={{ opacity: on ? 1 : 0 }}>
-                      ✓
-                    </span>
-                    <span className="shrink-0">{data.icon}</span>
-                    <span className="leading-snug">{name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {sidebarSection === "company" && (
-          <div className="space-y-3 animate-in-fade">
-            <div className="space-y-2 rounded-lg border border-border p-3">
-              <button
-                type="button"
-                onClick={applyIdealProfile}
-                className="w-full rounded-md bg-primary px-3 py-2 text-ui font-semibold text-primary-foreground"
-              >
-                Apply ideal profile
-              </button>
-              <button
-                type="button"
-                onClick={resetIdealProfile}
-                className="w-full rounded-md border border-border py-2 text-data font-medium text-muted-foreground hover:bg-muted"
-              >
-                Reset profile filters
-              </button>
-              <p className="text-data leading-relaxed text-muted-foreground">
-                Founded before 2017, 15–100 employees, $2–10M revenue, proprietary. Unknown revenue/employees are kept.
-              </p>
-            </div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Company attributes</p>
-            <label className="block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Company type</label>
-            <select
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
-              value={companyTypeFilter}
-              onChange={(e) => setCompanyTypeFilter(e.target.value)}
-            >
-              {COMPANY_TYPES.map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
-            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Ownership</label>
-            <select
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
-              value={ownershipFilter}
-              onChange={(e) => setOwnershipFilter(e.target.value)}
-            >
-              {OWNERSHIP_TYPES.map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
-            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Revenue</label>
-            <select
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
-              value={revenueFilter}
-              onChange={(e) => setRevenueFilter(e.target.value)}
-            >
-              {REVENUE_RANGES.map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
-            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Employees</label>
-            <select
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
-              value={sizeFilter}
-              onChange={(e) => setSizeFilter(e.target.value)}
-            >
-              {EMPLOYEE_RANGES.map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
-            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Year founded</label>
-            <select
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
-              value={foundedFilter}
-              onChange={(e) => setFoundedFilter(e.target.value)}
-            >
-              {FOUNDED_RANGES.map((s) => (
-                <option key={s}>{s}</option>
-              ))}
-            </select>
-            <p className="mt-4 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">PE thesis filters</p>
-            <label className="flex items-center gap-2 text-data text-muted-foreground">
-              <input type="checkbox" checked={thesisRequireMissionCritical} onChange={(e) => setThesisRequireMissionCritical(e.target.checked)} />
-              Mission-critical
-            </label>
-            <label className="flex items-center gap-2 text-data text-muted-foreground">
-              <input type="checkbox" checked={thesisRequireVertIntegrated} onChange={(e) => setThesisRequireVertIntegrated(e.target.checked)} />
-              Vertically integrated
-            </label>
-            <label className="flex items-center gap-2 text-data text-muted-foreground">
-              <input type="checkbox" checked={thesisRequireProprietary} onChange={(e) => setThesisRequireProprietary(e.target.checked)} />
-              Proprietary stack
-            </label>
-            <label className="flex items-center gap-2 text-data text-muted-foreground">
-              <input type="checkbox" checked={thesisRequireFounderVintage} onChange={(e) => setThesisRequireFounderVintage(e.target.checked)} />
-              Founder-op or vintage PE
-            </label>
-            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Min ownership confidence
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={minOwnershipConfidence}
-              onChange={(e) => setMinOwnershipConfidence(Number(e.target.value))}
-              className="w-full"
-            />
-            <p className="text-data text-muted-foreground">{minOwnershipConfidence.toFixed(2)}</p>
-            {activeFilterCount > 0 && (
-              <button
-                type="button"
-                onClick={clearAll}
-                className="mt-3 w-full rounded-md border border-destructive/40 py-2 text-data font-medium text-destructive hover:bg-destructive/10"
-              >
-                Clear all filters
-              </button>
-            )}
-          </div>
-        )}
-
-        {sidebarSection === "tags" && (
-          <div className="space-y-4 animate-in-fade">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-primary">
-              {selectedProducts.length} product categor{selectedProducts.length === 1 ? "y" : "ies"} selected
-            </p>
-            {selectedProducts.length > 1 && (
-              <div className="space-y-2">
-                <p className="text-data text-muted-foreground">Pick a category to edit capability tags</p>
-                <div className="flex flex-wrap gap-2">
-                  {selectedProducts.map((productName) => {
-                    const pdata = SOFTWARE_PRODUCTS[productName];
-                    if (!pdata) return null;
-                    const active = capabilityFocusProduct === productName;
-                    return (
-                      <button
-                        key={productName}
-                        type="button"
-                        onClick={() => setDiscoverCapabilityProduct(productName)}
-                        className={`rounded-md border px-2.5 py-1.5 text-left text-data transition-colors ${
-                          active
-                            ? "border-primary/50 bg-primary/10 text-foreground"
-                            : "border-border text-muted-foreground hover:bg-muted/50"
-                        }`}
-                      >
-                        <span className="me-1">{pdata.icon}</span>
-                        {productName}
-                      </button>
-                    );
-                  })}
-                </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={!similarMatches.length}
+                  onClick={() => {
+                    setSelectedSimilarIds(similarMatches.map((m) => m.id));
+                  }}
+                  className="rounded-md border border-border px-3 py-2 text-data font-medium hover:bg-muted disabled:opacity-40"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedSimilarIds.length || bulkRejectLoading}
+                  onClick={bulkRejectSimilarSelected}
+                  className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-data font-semibold text-destructive hover:bg-destructive/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {bulkRejectLoading ? "…" : `Reject selected (${selectedSimilarIds.length})`}
+                </button>
               </div>
-            )}
-            {(() => {
-              const productName = capabilityFocusProduct;
-              const pdata = SOFTWARE_PRODUCTS[productName];
-              if (!pdata) return null;
-              return (
-                <div className="space-y-3 border-t border-border pt-3">
-                  <div>
-                    <span className="me-2">{pdata.icon}</span>
-                    <span className="text-ui font-semibold text-foreground">{productName}</span>
-                    <p className="mt-1 text-data leading-relaxed text-muted-foreground">{pdata.description}</p>
-                  </div>
-                  {Object.entries(pdata.filters).map(([group, tags]) => (
-                    <div key={productName + group} className="space-y-2">
-                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{group}</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {tags.map((tag) => {
-                          const active = ((selectedTagsByProduct[productName] || {})[group] || []).includes(tag);
-                          return (
-                            <button
-                              key={tag}
-                              type="button"
-                              onClick={() => toggleTag(productName, group, tag)}
-                              className={`rounded-md border px-2.5 py-1 text-data transition-colors ${
-                                active
-                                  ? "border-primary/50 bg-primary/10 text-primary"
-                                  : "border-border text-muted-foreground hover:border-muted-foreground/50"
-                              }`}
-                            >
-                              {tag}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
-            {selectedVerticals.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Verticals</span>
-                {selectedVerticals.map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => toggleVertical(v)}
-                    className={`${pillBase} border-amber-500/40 bg-amber-500/5 text-amber-900 dark:text-amber-100`}
-                  >
-                    ✕ {v}
-                  </button>
-                ))}
-              </div>
-            )}
+            </div>
           </div>
-        )}
+        </div>
+      )}
+
+      <FilterDrawer open={filterDrawerOpen} onClose={() => setFilterDrawerOpen(false)}>
+        <DiscoverFilterPanel
+          sidebarSection={sidebarSection}
+          setSidebarSection={setSidebarSection}
+          geoHelpText="Discover shows companies whose resolved headquarters country is in your selection. Leave all regions unchecked for worldwide."
+          verticals={VERTICALS}
+          selectedVerticals={selectedVerticals}
+          onToggleVertical={toggleVertical}
+          onClearVerticals={() => setSelectedVerticals([])}
+          softwareProducts={SOFTWARE_PRODUCTS}
+          softwareProductKeys={SOFTWARE_PRODUCT_KEYS}
+          selectedProducts={selectedProducts}
+          setSelectedProducts={setSelectedProducts}
+          companyTypes={COMPANY_TYPES}
+          ownershipTypes={OWNERSHIP_TYPES}
+          revenueRanges={REVENUE_RANGES}
+          employeeRanges={EMPLOYEE_RANGES}
+          foundedRanges={FOUNDED_RANGES}
+          companyTypeFilter={companyTypeFilter}
+          setCompanyTypeFilter={setCompanyTypeFilter}
+          ownershipFilter={ownershipFilter}
+          setOwnershipFilter={setOwnershipFilter}
+          revenueFilter={revenueFilter}
+          setRevenueFilter={setRevenueFilter}
+          sizeFilter={sizeFilter}
+          setSizeFilter={setSizeFilter}
+          foundedFilter={foundedFilter}
+          setFoundedFilter={setFoundedFilter}
+          allowedCountryCodes={allowedCountryCodes}
+          setAllowedCountryCodes={setAllowedCountryCodes}
+          thesisRequireMissionCritical={thesisRequireMissionCritical}
+          setThesisRequireMissionCritical={setThesisRequireMissionCritical}
+          thesisRequireVertIntegrated={thesisRequireVertIntegrated}
+          setThesisRequireVertIntegrated={setThesisRequireVertIntegrated}
+          thesisRequireProprietary={thesisRequireProprietary}
+          setThesisRequireProprietary={setThesisRequireProprietary}
+          thesisRequireFounderVintage={thesisRequireFounderVintage}
+          setThesisRequireFounderVintage={setThesisRequireFounderVintage}
+          minOwnershipConfidence={minOwnershipConfidence}
+          setMinOwnershipConfidence={setMinOwnershipConfidence}
+          activeFilterCount={activeFilterCount}
+          onClearAll={clearAll}
+          onApplyIdealProfile={applyIdealProfile}
+          onResetIdealProfile={resetIdealProfile}
+        />
+      </FilterDrawer>
+
+      <FilterDrawer
+        title="Universe filters"
+        open={universeFilterDrawerOpen}
+        onClose={() => setUniverseFilterDrawerOpen(false)}
+      >
+        <DiscoverFilterPanel
+          sidebarSection={universeSidebarSection}
+          setSidebarSection={setUniverseSidebarSection}
+          geoHelpText="Universe list uses the same country allowlist logic. Leave all regions unchecked for worldwide. Strict vertical fit follows Settings."
+          verticals={VERTICALS}
+          selectedVerticals={universeSelectedVerticals}
+          onToggleVertical={toggleUniverseVertical}
+          onClearVerticals={() => setUniverseSelectedVerticals([])}
+          softwareProducts={SOFTWARE_PRODUCTS}
+          softwareProductKeys={SOFTWARE_PRODUCT_KEYS}
+          selectedProducts={universeSelectedProducts}
+          setSelectedProducts={setUniverseSelectedProducts}
+          companyTypes={COMPANY_TYPES}
+          ownershipTypes={OWNERSHIP_TYPES}
+          revenueRanges={REVENUE_RANGES}
+          employeeRanges={EMPLOYEE_RANGES}
+          foundedRanges={FOUNDED_RANGES}
+          companyTypeFilter={universeCompanyTypeFilter}
+          setCompanyTypeFilter={setUniverseCompanyTypeFilter}
+          ownershipFilter={universeOwnershipFilter}
+          setOwnershipFilter={setUniverseOwnershipFilter}
+          revenueFilter={universeRevenueFilter}
+          setRevenueFilter={setUniverseRevenueFilter}
+          sizeFilter={universeSizeFilter}
+          setSizeFilter={setUniverseSizeFilter}
+          foundedFilter={universeFoundedFilter}
+          setFoundedFilter={setUniverseFoundedFilter}
+          allowedCountryCodes={universeAllowedCountryCodes}
+          setAllowedCountryCodes={setUniverseAllowedCountryCodes}
+          thesisRequireMissionCritical={universeThesisRequireMissionCritical}
+          setThesisRequireMissionCritical={setUniverseThesisRequireMissionCritical}
+          thesisRequireVertIntegrated={universeThesisRequireVertIntegrated}
+          setThesisRequireVertIntegrated={setUniverseThesisRequireVertIntegrated}
+          thesisRequireProprietary={universeThesisRequireProprietary}
+          setThesisRequireProprietary={setUniverseThesisRequireProprietary}
+          thesisRequireFounderVintage={universeThesisRequireFounderVintage}
+          setThesisRequireFounderVintage={setUniverseThesisRequireFounderVintage}
+          minOwnershipConfidence={universeMinOwnershipConfidence}
+          setMinOwnershipConfidence={setUniverseMinOwnershipConfidence}
+          activeFilterCount={universeActiveFilterCount}
+          onClearAll={clearAllUniverse}
+          onApplyIdealProfile={applyIdealProfileUniverse}
+          onResetIdealProfile={resetIdealProfileUniverse}
+        />
       </FilterDrawer>
 
       <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)}>
