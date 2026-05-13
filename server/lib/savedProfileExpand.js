@@ -2,6 +2,7 @@
  * Expand discovery brief from saved portfolio (LLM or heuristic).
  */
 
+import { normalizeOllamaBase, ollamaChatOrGenerate } from "./ollamaHttp.js";
 import { KNOWN_VERTICALS, PORTFOLIO_PRODUCT_NAMES } from "./portfolioProductNames.js";
 
 function parseJsonFromText(text) {
@@ -158,25 +159,10 @@ async function expandGemini(env, portfolioText, emit) {
 }
 
 async function expandOllama(env, portfolioText, emit) {
-  const base = (env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const base = normalizeOllamaBase(env.OLLAMA_URL);
   const model = env.OLLAMA_MODEL || "llama3.2";
-  const res = await fetch(`${base}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      stream: false,
-      messages: [
-        {
-          role: "user",
-          content: `${buildSystemPrompt()}\n\nSnapshots:\n${portfolioText.slice(0, 12000)}`,
-        },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error(`Ollama ${res.status}`);
-  const data = await res.json();
-  const text = data.message?.content || "";
+  const userContent = `${buildSystemPrompt()}\n\nSnapshots:\n${portfolioText.slice(0, 12000)}`;
+  const text = await ollamaChatOrGenerate(base, model, userContent);
   return normalizeExpanded(parseJsonFromText(text), emit);
 }
 

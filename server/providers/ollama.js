@@ -1,3 +1,5 @@
+import { normalizeOllamaBase, ollamaChatOrGenerate } from "../lib/ollamaHttp.js";
+
 function parseJsonFromText(text) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -23,7 +25,7 @@ function logLine(sseEmit, level, message) {
 
 /** @param {NodeJS.ProcessEnv} env @param {(evt: object) => void} [sseEmit] */
 export function ollamaClassifier(env, sseEmit) {
-  const base = (env.OLLAMA_URL || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const base = normalizeOllamaBase(env.OLLAMA_URL);
   const model = env.OLLAMA_MODEL || "llama3.2";
   return {
     name: "ollama",
@@ -33,34 +35,13 @@ export function ollamaClassifier(env, sseEmit) {
       logLine(sseEmit, "log", `[ollama] classify start model=${model} base=${base} company="${label}"`);
 
       try {
-        const res = await fetch(`${base}/api/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model,
-            stream: false,
-            messages: [
-              {
-                role: "user",
-                content: `Return ONLY JSON: {"missionCritical":boolean,"verticallyIntegrated":boolean,"proprietaryStack":boolean,"missionCriticalReason":string,"verticalIntegrationReason":string,"confidence":number}
+        const userContent = `Return ONLY JSON: {"missionCritical":boolean,"verticallyIntegrated":boolean,"proprietaryStack":boolean,"missionCriticalReason":string,"verticalIntegrationReason":string,"confidence":number}
 
 Company: ${companyName}
 Text:
-${homepageText.slice(0, 8000)}`,
-              },
-            ],
-          }),
-        });
-        if (!res.ok) {
-          logLine(
-            sseEmit,
-            "warn",
-            `[ollama] classify HTTP ${res.status} (${Date.now() - t0}ms) company="${label}"`
-          );
-          throw new Error(`Ollama ${res.status}`);
-        }
-        const data = await res.json();
-        const text = data.message?.content || "";
+${homepageText.slice(0, 8000)}`;
+
+        const text = await ollamaChatOrGenerate(base, model, userContent);
         const parsed = parseJsonFromText(text);
         const j = parsed || {};
         if (!parsed) {

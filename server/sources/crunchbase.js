@@ -47,13 +47,13 @@ export async function searchCrunchbase(brief, env) {
           (typeof id === "string" ? id : null) ||
           "Unknown";
         const webRaw = props.website?.value ?? props.website;
+        // Parens required: ASI can break `... : webRaw \n ? ...` across lines.
         const web =
           typeof webRaw === "string"
             ? webRaw.startsWith("http")
               ? webRaw
-              : webRaw
-                ? `https://${webRaw}`
-                : "";
+              : (webRaw ? `https://${webRaw}` : "")
+            : "";
         const empEnum = props.num_employees_enum;
         let employees = null;
         if (typeof empEnum === "string") {
