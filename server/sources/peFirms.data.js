@@ -29,5 +29,8 @@ export const PE_FIRMS = [
   { id: "ftv-capital", name: "FTV Capital", portfolioUrl: "https://www.ftvcapital.com/portfolio/" },
   { id: "general-atlantic", name: "General Atlantic", portfolioUrl: "https://www.generalatlantic.com/portfolio" },
   { id: "thoma", name: "Thoma Bravo", portfolioUrl: "https://www.thomabravo.com/portfolio" },
-  { id: "vista", name: "Vista Equity Partners", portfolioUrl: "https://www.vistaequitypartners.com/portfolio.html" },
+  { id: "clearlake", name: "Clearlake Capital", portfolioUrl: "https://www.clearlake.com/portfolio/" },
+  { id: "welsh-carson", name: "Welsh, Carson, Anderson & Stowe", portfolioUrl: "https://www.welshcarson.com/portfolio/" },
+  { id: "new-mountain", name: "New Mountain Capital", portfolioUrl: "https://www.newmountaincapital.com/portfolio/" },
+  { id: "gtcr", name: "GTCR", portfolioUrl: "https://www.gtcr.com/portfolio/" },
 ];

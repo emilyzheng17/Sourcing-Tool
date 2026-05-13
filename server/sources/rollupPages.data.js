@@ -46,4 +46,9 @@ export const ROLLUP_PAGES = [
     name: "Evergreen Services Group",
     pageUrl: "https://www.evergreensg.com/",
   },
+  {
+    id: "volaris-companies",
+    name: "Volaris Group Operating Companies",
+    pageUrl: "https://www.volarisgroup.com/our-businesses/",
+  },
 ];

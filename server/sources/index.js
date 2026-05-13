@@ -8,6 +8,9 @@ import { searchBrave } from "./brave.js";
 import { searchExa } from "./exa.js";
 import { searchApollo } from "./apollo.js";
 import { searchCrunchbase } from "./crunchbase.js";
+import { searchTrustRadius } from "./trustRadius.js";
+import { searchTavily } from "./tavily.js";
+import { searchHighRiskSources } from "./highRisk/index.js";
 
 /**
  * Run all source adapters in parallel.
@@ -28,6 +31,9 @@ export async function fanOutSources(brief, env, fetchOpts) {
     exa,
     apollo,
     crunchbase,
+    trustradius,
+    tavily,
+    highRisk,
   ] = await Promise.all([
     searchPePortfolios(brief, fo),
     searchRollupPages(brief, fo),
@@ -39,6 +45,23 @@ export async function fanOutSources(brief, env, fetchOpts) {
     searchExa(brief, env),
     searchApollo(brief, env),
     searchCrunchbase(brief, env),
+    searchTrustRadius(brief, fo),
+    searchTavily(brief, env || process.env),
+    searchHighRiskSources(brief, env || process.env),
   ]);
-  return { pe, rollup, assoc, g2, capterra, getapp, brave, exa, apollo, crunchbase };
+  return {
+    pe,
+    rollup,
+    assoc,
+    g2,
+    capterra,
+    getapp,
+    brave,
+    exa,
+    apollo,
+    crunchbase,
+    trustradius,
+    tavily,
+    highRisk,
+  };
 }

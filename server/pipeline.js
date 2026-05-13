@@ -5,6 +5,7 @@ import { normalizeDomain } from "./lib/domains.js";
 import { discoverMergedCandidates } from "./lib/candidateDiscovery.js";
 import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from "./db.js";
 import { breadthMultiplier } from "./lib/breadth.js";
+import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
 import pLimit from "p-limit";
 
 const JOB_MS_MIN = 10 * 60 * 1000;
@@ -86,9 +87,32 @@ export async function runSearchPipeline(brief, env, emit) {
         }
         if (!enriched) return;
 
+        const strictVertical =
+          !!(brief.strictVerticalFit ||
+            ["1", "true", "yes"].includes(String(env.STRICT_VERTICAL_FIT || "").toLowerCase()));
+
+        if (
+          strictVertical &&
+          Array.isArray(brief.selectedVerticals) &&
+          brief.selectedVerticals.length > 0 &&
+          typeof enriched.verticalFitScore === "number" &&
+          enriched.verticalFitScore < VERTICAL_MATCH_THRESHOLD
+        ) {
+          emit({
+            type: "log",
+            message: `Skipped (strict vertical, fit ${enriched.verticalFitScore}): ${enriched.name}`,
+          });
+          return;
+        }
+
         let scored = { ...enriched, sourceTags: enriched.sourceTags || c.sourceTags || [c.sourceTag] };
         const ruleScore = scoreThesis(scored, brief);
-        scored = { ...scored, ...ruleScore, score: ruleScore.thesisScore };
+        let thesisPts = ruleScore.thesisScore;
+        if (Array.isArray(brief.selectedVerticals) && brief.selectedVerticals.length > 0 && typeof scored.verticalFitScore === "number") {
+          thesisPts -= verticalFitThesisPenalty(scored.verticalFitScore);
+        }
+        thesisPts = Math.max(0, Math.min(100, Math.round(thesisPts)));
+        scored = { ...scored, ...ruleScore, score: thesisPts };
 
         if (classifier && classifier.name !== "none") {
           try {

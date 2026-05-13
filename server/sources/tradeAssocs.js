@@ -8,19 +8,15 @@ import { breadthMultiplier } from "../lib/breadth.js";
  * Many pages are HTML-heavy; scraper extracts external http(s) links as weak candidates.
  */
 const VERTICAL_URLS = {
-  "Metals & Mining": [
-    "https://www.nssga.org/",
-    "https://www.nma.org/",
-    "https://www.gold.org/"
-  ],
-  "Bulk Materials": ["https://www.nssga.org/"],
-  "Bulk Liquids": ["https://www.api.org/"],
-  "Forestry & Lumber": ["https://www.afandpa.org/"],
-  "Structure Design & Analysis": ["https://www.asce.org/"],
-  "Contractor Solutions": ["https://www.agc.org/"],
-  "Equipment & Parts": ["https://www.aem.org/"],
-  "Waste & Recycling": ["https://isri.org/"],
-  "Safety & Compliance": ["https://www.osha.gov/"],
+  "Metals & Mining": ["https://www.nssga.org/", "https://www.nma.org/", "https://www.gold.org/", "https://www.copper.org/"],
+  "Bulk Materials": ["https://www.nssga.org/", "https://www.aisc.org/"],
+  "Bulk Liquids": ["https://www.api.org/", "https://www.gpa.org/"],
+  "Forestry & Lumber": ["https://www.afandpa.org/", "https://www.nlga.org/"],
+  "Structure Design & Analysis": ["https://www.asce.org/", "https://www.acec.org/"],
+  "Contractor Solutions": ["https://www.agc.org/", "https://www.artba.org/"],
+  "Equipment & Parts": ["https://www.aem.org/", "https://www.mema.org/"],
+  "Waste & Recycling": ["https://isri.org/", "https://www.swana.org/industry-information"],
+  "Safety & Compliance": ["https://www.osha.gov/", "https://www.aiha.org/"],
 };
 
 function extractLinks(html, baseUrl, vertical) {

@@ -31,6 +31,8 @@ app.get("/api/settings-status", (_req, res) => {
     exa: !!env.EXA_API_KEY,
     apollo: !!env.APOLLO_API_KEY,
     crunchbase: !!env.CRUNCHBASE_API_KEY,
+    tavily: !!env.TAVILY_API_KEY,
+    highRiskExports: !!(env.ENABLE_HIGH_TOS_SOURCES === "1" && env.LINKEDIN_EXPORT_PATH),
     openai: !!env.OPENAI_API_KEY,
     anthropic: !!env.ANTHROPIC_API_KEY,
     gemini: !!env.GEMINI_API_KEY,

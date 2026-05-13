@@ -5,6 +5,7 @@ import { openCorporatesSearch } from "./openCorporates.js";
 import { extractOrganizationSignals } from "./lib/schemaOrgSignals.js";
 import { tryFetchAtsSignals } from "./lib/atsPublic.js";
 import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePageText.js";
+import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
 
 const MISSION_KW = [
   "system of record",
@@ -368,13 +369,25 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
         ? [brief.activeProduct]
         : [];
 
+  const desc = buildDescription(combinedText, resolved.name, productLabel);
+  const homepageSample = combinedText.slice(0, 4000);
+  const selectedVerts = Array.isArray(brief.selectedVerticals) ? brief.selectedVerticals : [];
+  const fitCorpus = buildVerticalFitCorpus({
+    homepageTextSample: homepageSample,
+    braveSnippet,
+    description: desc,
+    homepageMetaDescription: structured.metaDescription,
+    rawMetadata: resolved.rawMetadata,
+  });
+  const fit = evaluateVerticalFit(selectedVerts, fitCorpus, resolved.rawMetadata?.apolloIndustry);
+
   return {
     ...resolved,
     sourceTags: resolved.sourceTags || [resolved.sourceTag].filter(Boolean),
     domain,
     website: base.split("?")[0],
     name: resolved.name || title,
-    description: buildDescription(combinedText, resolved.name, productLabel),
+    description: desc,
     foundedYear,
     hq,
     country: oc?.jurisdiction || "US",
@@ -384,13 +397,16 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     homepageMetaDescription: structured.metaDescription,
     atsOpenRoles: atsSignals?.openRoles ?? null,
     atsProvider: atsSignals?.provider ?? null,
-    verticals: brief.selectedVerticals?.length ? brief.selectedVerticals : [],
+    searchVerticals: selectedVerts.length ? [...selectedVerts] : [],
+    verticals: fit.matchedVerticals,
+    verticalFitScore: fit.verticalFitScore,
+    verticalFitReasons: fit.verticalFitReasons,
     products,
     tags: Array.isArray(brief.selectedTags) ? brief.selectedTags : [],
     acquisitionHistory,
     founderStillOperating,
     openCorporates: oc,
-    homepageTextSample: combinedText.slice(0, 4000),
+    homepageTextSample: homepageSample,
     braveSnippet: braveSnippet.slice(0, 2000),
     missionCriticalKeywords: countKeywordHits(lower, MISSION_KW),
     ossSignals: countKeywordHits(lower, OSS_KW),

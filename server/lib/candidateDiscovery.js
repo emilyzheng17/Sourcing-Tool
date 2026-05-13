@@ -14,7 +14,8 @@ export function primaryKey(c) {
   if (
     d.includes("g2.com") ||
     d.includes("capterra.com") ||
-    d.includes("getapp.com")
+    d.includes("getapp.com") ||
+    d.includes("trustradius.com")
   ) {
     const slug = (c.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80);
     return `listing:${slug}`;
@@ -109,6 +110,8 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
 
   let timedOut = false;
   const flatTagged = [];
+  /** @type {Record<string, number>} */
+  const bucketTotals = {};
   for (const vctx of verticalContexts) {
     if (Date.now() > deadline) {
       timedOut = true;
@@ -130,10 +133,11 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
       };
       emitFn({
         type: "log",
-        message: `Fan-out: [${verticalLabel}] × ${product} — PE & rollup, associations, G2, Capterra, GetApp, Brave, Exa…`,
+        message: `Fan-out: [${verticalLabel}] × ${product} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
       });
       const buckets = await fanOutSources(subBrief, env, fetchOpts);
       const counts = Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v?.length || 0]));
+      for (const [k, n] of Object.entries(counts)) bucketTotals[k] = (bucketTotals[k] ?? 0) + n;
       emitFn({ type: "log", message: `Sources raw [${verticalLabel}] (${product}): ${JSON.stringify(counts)}` });
 
       const mergedPart = mergeCandidates(buckets).map((c) => ({
@@ -144,6 +148,11 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
     }
   }
 
+  emitFn({
+    type: "log",
+    message: `Sources raw aggregated (all passes, pre-dedupe): ${JSON.stringify(bucketTotals)}`,
+  });
+
   let merged = mergeFlatCandidates(flatTagged);
   merged = merged.filter((c) => {
     const d = normalizeDomain(c.website);
@@ -152,7 +161,8 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
     if (
       d.includes("g2.com") ||
       d.includes("capterra.com") ||
-      d.includes("getapp.com")
+      d.includes("getapp.com") ||
+      d.includes("trustradius.com")
     )
       return true;
     return isLikelyCompanyDomain(d);

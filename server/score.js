@@ -2,6 +2,8 @@
  * Rule-based thesis scoring + ownership_class (no LLM).
  */
 
+import { vertScoreFromVerticalFit } from "./lib/verticalFit.js";
+
 /** @param {string|null|undefined} s */
 function employeeMidpoint(s) {
   if (!s || typeof s !== "string") return null;
@@ -90,10 +92,15 @@ export function scoreThesis(enriched, brief) {
     3,
     (enriched.missionCriticalKeywords || 0) + (text.match(/\b\d{2,4}\+?\s+customers?\b/) ? 1 : 0)
   );
-  const verticalKeywords = (brief.selectedVerticals || []).map((v) => v.toLowerCase().split(/\s+/)[0]);
+  const selectedVerts = brief.selectedVerticals || [];
   let vertScore = 0;
-  for (const vk of verticalKeywords) {
-    if (vk && text.includes(vk)) vertScore += 1;
+  if (selectedVerts.length > 0 && typeof enriched.verticalFitScore === "number") {
+    vertScore = vertScoreFromVerticalFit(enriched.verticalFitScore);
+  } else {
+    const verticalKeywords = selectedVerts.map((v) => v.toLowerCase().split(/\s+/)[0]);
+    for (const vk of verticalKeywords) {
+      if (vk && text.includes(vk)) vertScore += 1;
+    }
   }
   vertScore = Math.min(3, vertScore + (enriched.sourceTags?.some((s) => String(s).startsWith("Assoc:")) ? 1 : 0));
 

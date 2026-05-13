@@ -248,6 +248,7 @@ export default function CompanySourcingTool() {
   const [expandedCompany, setExpandedCompany] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [llmProvider, setLlmProvider] = useState(() => localStorage.getItem("sourcingLlmProvider") || "none");
+  const [strictVerticalFit, setStrictVerticalFit] = useState(() => localStorage.getItem("sourcingStrictVerticalFit") === "1");
   const [apiStatus, setApiStatus] = useState({});
   const [thesisRequireMissionCritical, setThesisRequireMissionCritical] = useState(false);
   const [thesisRequireVertIntegrated, setThesisRequireVertIntegrated] = useState(false);
@@ -279,6 +280,10 @@ export default function CompanySourcingTool() {
   useEffect(() => {
     localStorage.setItem("sourcingLlmProvider", llmProvider);
   }, [llmProvider]);
+
+  useEffect(() => {
+    localStorage.setItem("sourcingStrictVerticalFit", strictVerticalFit ? "1" : "0");
+  }, [strictVerticalFit]);
 
   const refreshApiStatus = useCallback(() => {
     fetch("/api/settings-status")
@@ -508,6 +513,7 @@ export default function CompanySourcingTool() {
         maxCompanies,
         breadth,
         settings: { llmProvider },
+        strictVerticalFit,
         thesis: {
           requireMissionCritical: thesisRequireMissionCritical,
           requireVerticallyIntegrated: thesisRequireVertIntegrated,
@@ -616,7 +622,10 @@ export default function CompanySourcingTool() {
       return {
         Website: m.website || c.website || "",
         Company: c.name,
-        Vertical: (c.verticals || []).join(", "),
+        "Industry match (scraped)": (c.verticals || []).join(", "),
+        "Search verticals": (c.searchVerticals || []).join(", "),
+        "Vertical fit score": typeof c.verticalFitScore === "number" ? c.verticalFitScore : "",
+        "Vertical fit notes": (c.verticalFitReasons || []).join(" | "),
         Country: c.country || "",
         "Year Founded": c.foundedYear || "",
         Employees: c.employees || "",
@@ -661,7 +670,10 @@ export default function CompanySourcingTool() {
     ws["!cols"] = [
       { wch: 35 },
       { wch: 25 },
-      { wch: 28 },
+      { wch: 26 },
+      { wch: 22 },
+      { wch: 10 },
+      { wch: 36 },
       { wch: 8 },
       { wch: 13 },
       { wch: 12 },
@@ -793,6 +805,8 @@ export default function CompanySourcingTool() {
           !c.name.toLowerCase().includes(q) &&
           !(c.description || "").toLowerCase().includes(q) &&
           !(c.verticals || []).some((v) => v.toLowerCase().includes(q)) &&
+          !(c.searchVerticals || []).some((v) => String(v).toLowerCase().includes(q)) &&
+          !(c.verticalFitReasons || []).some((s) => String(s).toLowerCase().includes(q)) &&
           !(c.sourceTags || []).some((s) => String(s).toLowerCase().includes(q)) &&
           !(c.matchedProducts || []).some((p) => String(p).toLowerCase().includes(q))
         )
@@ -1085,11 +1099,18 @@ export default function CompanySourcingTool() {
                                     {s}
                                   </span>
                                 ))}
-                                {(c.verticals || []).map((v) => (
-                                  <span key={v} className={`${pillBase} border-amber-500/30 bg-amber-500/5 text-amber-900 dark:text-amber-100`}>
-                                    {v}
+                                {(c.verticals || []).length > 0 ? (
+                                  (c.verticals || []).map((v) => (
+                                    <span key={v} className={`${pillBase} border-amber-500/30 bg-amber-500/5 text-amber-900 dark:text-amber-100`}>
+                                      {v}
+                                    </span>
+                                  ))
+                                ) : (c.searchVerticals || []).length > 0 ? (
+                                  <span className={`${pillBase} border-muted-foreground/30 bg-muted/40 text-muted-foreground`}>
+                                    No scraped industry match
+                                    {typeof c.verticalFitScore === "number" ? ` (${c.verticalFitScore})` : ""}
                                   </span>
-                                ))}
+                                ) : null}
                                 {(c.matchedProducts || []).map((mp) => (
                                   <span key={mp} className={`${pillBase} border-violet-500/30 bg-violet-500/5 text-violet-900 dark:text-violet-100`}>
                                     {mp}
@@ -1121,6 +1142,24 @@ export default function CompanySourcingTool() {
                                   </div>
                                 ))}
                               </div>
+                              {(c.searchVerticals || []).length > 0 && (
+                                <p className="text-data text-muted-foreground">
+                                  <span className="font-semibold text-foreground">Search verticals</span> {" "}
+                                  {(c.searchVerticals || []).join(" · ")}
+                                  {typeof c.verticalFitScore === "number" && (
+                                    <>
+                                      {" "}
+                                      · Overall fit score {c.verticalFitScore}/100
+                                    </>
+                                  )}
+                                </p>
+                              )}
+                              {(c.verticalFitReasons || []).length > 0 && (
+                                <p className="text-data text-muted-foreground">
+                                  <span className="font-semibold text-foreground">Industry signals</span>{" "}
+                                  {(c.verticalFitReasons || []).join("; ")}
+                                </p>
+                              )}
                               {(c.matchedProducts || []).length > 0 && (
                                 <p className="text-data text-muted-foreground">
                                   <span className="font-semibold uppercase tracking-wider text-data">Matched products</span>{" "}
@@ -1853,11 +1892,28 @@ export default function CompanySourcingTool() {
             </option>
           ))}
         </select>
+        <label className="mt-4 flex cursor-pointer items-start gap-3 text-data leading-snug">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-border"
+            checked={strictVerticalFit}
+            onChange={(e) => setStrictVerticalFit(e.target.checked)}
+          />
+          <span>
+            <span className="font-medium text-foreground">Strict vertical fit</span>
+            <span className="mt-1 block text-muted-foreground">
+              Only keep companies whose site text signals the industries you picked. Also available server-side via{" "}
+              <code className="text-data">STRICT_VERTICAL_FIT=1</code>.
+            </span>
+          </span>
+        </label>
         <div className="mt-4 space-y-1 rounded-md border border-border bg-muted/30 p-3 font-mono text-data text-muted-foreground">
           <div>Brave: {apiStatus.brave ? "on" : "off"}</div>
           <div>Exa: {apiStatus.exa ? "on" : "off"}</div>
           <div>Apollo: {apiStatus.apollo ? "on" : "off"}</div>
           <div>Crunchbase: {apiStatus.crunchbase ? "on" : "off"}</div>
+          <div>Tavily: {apiStatus.tavily ? "on" : "off"}</div>
+          <div>{apiStatus.highRiskExports ? "High-risk CSV/JSON ingest: ready" : "High-risk ingest: off"}</div>
           <div>OpenAI: {apiStatus.openai ? "on" : "off"}</div>
           <div>Anthropic: {apiStatus.anthropic ? "on" : "off"}</div>
           <div>Gemini: {apiStatus.gemini ? "on" : "off"}</div>

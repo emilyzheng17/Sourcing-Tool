@@ -15,6 +15,8 @@ export function buildSearchQueries(brief) {
     queries.push(`${v} vertical software proprietary`);
     queries.push(`site:g2.com ${v} ${productSlug}`);
     queries.push(`site:capterra.com ${v} ${productSlug}`);
+    queries.push(`site:trustradius.com ${v} ${productSlug}`);
+    queries.push(`site:getapp.com ${v} ${productSlug}`);
     queries.push(`"${v}" "private equity" software acquisition`);
     queries.push(`"${v}" bootstrapped software company`);
     queries.push(`"${v}" founder led enterprise software`);
@@ -37,10 +39,18 @@ export function buildSearchQueries(brief) {
     queries.push(`acquired ${productSlug} software 2015..2019`);
   }
 
-  queries.push(`site:crunchbase.com ${productSlug}`);
-  queries.push(`site:softwareequity.com ${productSlug}`);
-  queries.push(`industrial ${productSlug} "system of record"`);
-  queries.push(`${productSlug} mission critical operations software`);
+  if (!selectedVerticals.length) {
+    queries.push(`site:crunchbase.com ${productSlug}`);
+    queries.push(`site:softwareequity.com ${productSlug}`);
+    queries.push(`industrial ${productSlug} "system of record"`);
+    queries.push(`${productSlug} mission critical operations software`);
+  } else {
+    for (const v of vert) {
+      const vslug = String(v).replace(/&/g, "and").toLowerCase();
+      queries.push(`site:crunchbase.com ${vslug} ${productSlug}`);
+    }
+    queries.push(`site:softwareequity.com ${vert.map((v) => String(v).replace(/&/g, "and").toLowerCase()).join(" ")} ${productSlug}`);
+  }
 
   // Dedupe while preserving order
   const seen = new Set();
