@@ -8,7 +8,9 @@
     "server": "node server/index.js",
     "client": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test ./server/__tests__/scrapingSignals.test.js ./server/__tests__/visiblePageText.test.js",
+    "free-discovery": "node scripts/free-discovery.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.6.0",
@@ -23,7 +25,11 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.5.0",
     "concurrently": "^9.1.0",
+    "playwright": "^1.49.0",
+    "postcss": "^8.5.14",
+    "tailwindcss": "^3.4.19",
     "vite": "5.4.20"
   }
 }

@@ -11,6 +11,7 @@ import {
   setManualClassify,
   getCompanyById,
 } from "./db.js";
+import { expandFromSavedPortfolio } from "./lib/savedProfileExpand.js";
 
 const app = express();
 app.use(cors());
@@ -91,9 +92,35 @@ app.get("/api/search/:jobId/stream", (req, res) => {
   });
 });
 
+app.post("/api/recommendations/from-saved", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const maxSaved = Math.min(120, Math.max(5, parseInt(String(body.maxSaved ?? 60), 10) || 60));
+    const { rows } = listUniverse({ offset: 0, limit: maxSaved, savedOnly: true });
+    if (!rows.length) {
+      res.json({
+        ok: false,
+        message: "Save at least one company in the universe first to build recommendations.",
+      });
+      return;
+    }
+    const companies = rows.map(rowToCompany).filter(Boolean);
+    const llmProvider = body.settings?.llmProvider ?? "none";
+    const out = await expandFromSavedPortfolio({
+      rows: companies,
+      llmProvider,
+      env: process.env,
+      emit: () => {},
+    });
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
 app.get("/api/universe", (req, res) => {
   const offset = parseInt(req.query.offset || "0", 10) || 0;
-  const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
+  const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 5000);
   const savedOnly = req.query.savedOnly === "1" || req.query.savedOnly === "true";
   const { rows, total } = listUniverse({ offset, limit, savedOnly });
   res.json({

@@ -1,5 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import * as XLSX from "xlsx";
+import { useTheme } from "./hooks/useTheme.js";
+import { DashboardShell } from "./components/DashboardShell.jsx";
+import { AppBar } from "./components/AppBar.jsx";
+import { FilterDrawer } from "./components/FilterDrawer.jsx";
+import { SettingsDrawer } from "./components/SettingsDrawer.jsx";
+import { CommandPalette } from "./components/CommandPalette.jsx";
 
 const VERTICALS = [
   "Metals & Mining","Bulk Materials","Bulk Liquids","Forestry & Lumber",
@@ -39,32 +45,181 @@ const OWNERSHIP_TYPES = [
   "Employee-Owned (ESOP)",
 ];
 
+const DEFAULT_PRODUCT_KEY = Object.keys(SOFTWARE_PRODUCTS)[0];
+
 function inFoundedEra(year, label) {
   if (label === "Any Era" || year == null || Number.isNaN(Number(year))) return true;
   const y = Number(year);
+  if (label === "Before 2017 (ideal)") return y < 2017;
+  if (label === "Before 2010") return y < 2010;
+  if (label === "2017–Present" || label === "2017-Present") return y >= 2017;
   if (label === "2020–Present") return y >= 2020;
   if (label === "2015–2019") return y >= 2015 && y <= 2019;
+  if (label === "2010–2016") return y >= 2010 && y <= 2016;
   if (label === "2010–2014") return y >= 2010 && y <= 2014;
   if (label === "2000–2009") return y >= 2000 && y <= 2009;
   if (label === "Before 2000") return y < 2000;
   return true;
 }
-const REVENUE_RANGES = ["Any Revenue","< $1M","$1M–$5M","$5M–$20M","$20M–$50M","$50M–$200M","$200M+"];
-const EMPLOYEE_RANGES = ["Any Size","1–10","11–50","51–200","201–500","501–1,000","1,000+"];
-const FOUNDED_RANGES = ["Any Era","2020–Present","2015–2019","2010–2014","2000–2009","Before 2000"];
+
+/** Midpoint headcount for UI band labels (aligns with server/score.js) */
+function employeeBandMidpoint(s) {
+  if (!s || typeof s !== "string") return null;
+  const t = s.toLowerCase().replace(/–/g, "-");
+  if (t.includes("1000+") || t.includes("1,000+")) return 1500;
+  if (t.includes("501") && t.includes("1,000")) return 750;
+  if (t.includes("201") && t.includes("500")) return 350;
+  if (t.includes("51") && t.includes("200")) return 125;
+  if (t.includes("15") && t.includes("100")) return 57;
+  if (t.includes("11") && t.includes("50")) return 30;
+  if (t.includes("1-10") || t.includes("1–10")) return 5;
+  return null;
+}
+
+function revenueBandMidpointMillions(s) {
+  if (!s || typeof s !== "string") return null;
+  const t = s.toLowerCase().replace(/–/g, "-");
+  if (t.includes("200m+") || t.includes("$200m")) return 300;
+  if (t.includes("50m") && t.includes("200m")) return 125;
+  if (t.includes("20m") && t.includes("50m")) return 35;
+  if (t.includes("5m") && t.includes("20m")) return 12;
+  if (t.includes("2m") && t.includes("10m")) return 6;
+  if (t.includes("1m") && t.includes("5m")) return 3;
+  if (t.includes("< $1m") || t.includes("<$1m")) return 0.5;
+  return null;
+}
+
+function matchesEmployeeFilter(c, filter) {
+  if (filter === "Any Size") return true;
+  if (!c.employees) return true;
+  if (filter === "15-100 (ideal)") {
+    const mid = employeeBandMidpoint(c.employees);
+    if (mid == null) return true;
+    return mid >= 15 && mid <= 100;
+  }
+  return c.employees === filter;
+}
+
+function matchesRevenueFilter(c, filter) {
+  if (filter === "Any Revenue") return true;
+  if (!c.revenue) return true;
+  if (filter === "$2M-$10M (ideal)") {
+    const m = revenueBandMidpointMillions(c.revenue);
+    if (m == null) return true;
+    return m >= 2 && m <= 10;
+  }
+  return c.revenue === filter;
+}
+
+const REVENUE_RANGES = [
+  "Any Revenue",
+  "< $1M",
+  "$1M-$5M",
+  "$2M-$10M (ideal)",
+  "$5M-$20M",
+  "$20M-$50M",
+  "$50M-$200M",
+  "$200M+",
+];
+const EMPLOYEE_RANGES = [
+  "Any Size",
+  "1-10",
+  "11-50",
+  "15-100 (ideal)",
+  "51-200",
+  "201-500",
+  "501-1,000",
+  "1,000+",
+];
+const FOUNDED_RANGES = [
+  "Any Era",
+  "Before 2017 (ideal)",
+  "Before 2010",
+  "2017-Present",
+  "2010-2016",
+  "2000-2009",
+  "Before 2000",
+  "2020-Present",
+  "2015-2019",
+  "2010-2014",
+];
 const QUALITY_TIERS = ["—","Bronze","Silver","Gold","Platinum"];
+const COMPANY_TYPES = ["Any Type", "Software", "Hardware", "Hybrid", "Unknown"];
+
+function matchesCompanyTypeFilter(c, filter) {
+  if (filter === "Any Type") return true;
+  const t = (c.companyType || "unknown").toLowerCase();
+  if (filter === "Software") return t === "software" || t === "unknown";
+  if (filter === "Hardware") return t === "hardware" || t === "hybrid";
+  if (filter === "Hybrid") return t === "hybrid";
+  if (filter === "Unknown") return t === "unknown";
+  return true;
+}
+
+const OWNER_BADGE_CLASS = {
+  "VC-Backed": "border-emerald-500/35 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100",
+  "Private Equity": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
+  "Founder-Owned": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Founder-Operated": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Vintage PE": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
+  "Recent PE": "border-indigo-500/35 bg-indigo-500/10 text-indigo-950 dark:text-indigo-100",
+  Unknown: "border-border bg-muted text-muted-foreground",
+  Acquired: "border-orange-500/35 bg-orange-500/10 text-orange-950 dark:text-orange-100",
+  "Family-Owned": "border-sky-500/35 bg-sky-500/10 text-sky-950 dark:text-sky-100",
+  "Employee-Owned (ESOP)": "border-rose-500/35 bg-rose-500/10 text-rose-950 dark:text-rose-100",
+  "Publicly Traded": "border-lime-500/35 bg-lime-500/10 text-lime-950 dark:text-lime-100",
+};
+
+function ownerBadgeClasses(label) {
+  return OWNER_BADGE_CLASS[label] || OWNER_BADGE_CLASS.Unknown;
+}
+
+function scoreTierClasses(score) {
+  const s = typeof score === "number" ? score : 0;
+  if (s >= 90) return "border-primary/50 bg-primary/10 text-primary";
+  if (s >= 80) return "border-sky-500/45 bg-sky-500/10 text-sky-950 dark:text-sky-100";
+  if (s >= 70) return "border-amber-500/45 bg-amber-500/12 text-amber-950 dark:text-amber-100";
+  return "border-orange-500/45 bg-orange-500/10 text-orange-950 dark:text-orange-100";
+}
+
+const COMPANY_TYPE_BADGE = {
+  software: { lbl: "SW", cls: "border-emerald-500/35 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100" },
+  hardware: { lbl: "HW", cls: "border-orange-500/35 bg-orange-500/10 text-orange-950 dark:text-orange-100" },
+  hybrid: { lbl: "Hybrid", cls: "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100" },
+  unknown: { lbl: "?", cls: "border-border bg-muted text-muted-foreground" },
+};
+
+function companyTypeBadge(companyType) {
+  const t = (companyType || "unknown").toLowerCase();
+  return COMPANY_TYPE_BADGE[t] || COMPANY_TYPE_BADGE.unknown;
+}
+
+const QUALITY_SELECT_CLASS = {
+  "—": "",
+  Bronze: "text-amber-900 dark:text-amber-100 border-amber-500/40",
+  Silver: "text-slate-800 dark:text-slate-100 border-slate-400/40",
+  Gold: "text-amber-950 dark:text-amber-50 border-amber-600/45",
+  Platinum: "text-slate-900 dark:text-slate-50 border-slate-300/50",
+};
+
+const pillBase =
+  "inline-flex items-center rounded-md border px-2 py-0.5 text-data";
 
 const defaultMeta = () => ({ website:"", contactName:"", role:"", email:"", quality:"—", comments:"" });
 
 export default function CompanySourcingTool() {
-  const [activeProduct, setActiveProduct] = useState("ERP & Operations");
-  const [selectedTags, setSelectedTags] = useState({});
+  const [selectedProducts, setSelectedProducts] = useState([DEFAULT_PRODUCT_KEY]);
+  const [selectedTagsByProduct, setSelectedTagsByProduct] = useState({});
   const [selectedVerticals, setSelectedVerticals] = useState([]);
   const [ownershipFilter, setOwnershipFilter] = useState("Any Ownership");
+  const [companyTypeFilter, setCompanyTypeFilter] = useState("Any Type");
   const [revenueFilter, setRevenueFilter] = useState("Any Revenue");
   const [sizeFilter, setSizeFilter] = useState("Any Size");
   const [foundedFilter, setFoundedFilter] = useState("Any Era");
+  const [maxCompanies, setMaxCompanies] = useState(500);
+  const [breadth, setBreadth] = useState("focused");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchProgress, setSearchProgress] = useState(null);
   const [companyMeta, setCompanyMeta] = useState(() => {
     try {
       return JSON.parse(typeof localStorage !== "undefined" ? localStorage.getItem("sourcingCompanyMeta") || "{}" : "{}");
@@ -73,8 +228,14 @@ export default function CompanySourcingTool() {
     }
   });
   const [activeTab, setActiveTab] = useState("discover");
-  const [sidebarSection, setSidebarSection] = useState("product");
+  const [sidebarSection, setSidebarSection] = useState("vertical");
   const [exportFlash, setExportFlash] = useState(false);
+  const pendingDiscoveryBoostRef = useRef(null);
+  const [recModalOpen, setRecModalOpen] = useState(false);
+  const [recPreview, setRecPreview] = useState(null);
+  const [recLoading, setRecLoading] = useState(false);
+  /** Which product's tag filters are shown in Discover when multiple products are selected */
+  const [discoverCapabilityProduct, setDiscoverCapabilityProduct] = useState(DEFAULT_PRODUCT_KEY);
 
   const [searchResults, setSearchResults] = useState([]);
   const [savedRows, setSavedRows] = useState([]);
@@ -93,6 +254,23 @@ export default function CompanySourcingTool() {
   const [thesisRequireProprietary, setThesisRequireProprietary] = useState(false);
   const [thesisRequireFounderVintage, setThesisRequireFounderVintage] = useState(false);
   const [minOwnershipConfidence, setMinOwnershipConfidence] = useState(0);
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [savedContactExpanded, setSavedContactExpanded] = useState({});
+  const resultsFilterInputRef = useRef(null);
+  const { theme, toggleTheme } = useTheme();
+
+  const activeProduct = selectedProducts[0] || DEFAULT_PRODUCT_KEY;
+
+  useEffect(() => {
+    setDiscoverCapabilityProduct((prev) =>
+      selectedProducts.includes(prev) ? prev : selectedProducts[0] || DEFAULT_PRODUCT_KEY
+    );
+  }, [selectedProducts]);
+
+  const capabilityFocusProduct = selectedProducts.includes(discoverCapabilityProduct)
+    ? discoverCapabilityProduct
+    : selectedProducts[0] || DEFAULT_PRODUCT_KEY;
 
   useEffect(() => {
     localStorage.setItem("sourcingCompanyMeta", JSON.stringify(companyMeta));
@@ -113,6 +291,39 @@ export default function CompanySourcingTool() {
     refreshApiStatus();
   }, [refreshApiStatus, settingsOpen]);
 
+  const fetchSimilarRecommendations = useCallback(async () => {
+    setRecLoading(true);
+    try {
+      const r = await fetch("/api/recommendations/from-saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: { llmProvider }, maxSaved: 60 }),
+      });
+      const d = await r.json();
+      setRecPreview(d);
+      setRecModalOpen(true);
+    } catch {
+      setRecPreview({ ok: false, message: "Failed to fetch recommendations." });
+      setRecModalOpen(true);
+    } finally {
+      setRecLoading(false);
+    }
+  }, [llmProvider]);
+
+  const applyRecommendationPreview = () => {
+    if (!recPreview?.ok || !Array.isArray(recPreview.selectedVerticals)) return;
+    setSelectedVerticals(recPreview.selectedVerticals);
+    const hinted = (recPreview.matchedProductHints || []).filter((x) => Object.keys(SOFTWARE_PRODUCTS).includes(String(x)));
+    if (hinted.length) setSelectedProducts(hinted);
+    pendingDiscoveryBoostRef.current = {
+      additionalSearchQueries: [...(recPreview.additionalSearchQueries || [])],
+      recommendationExaQueries: [...(recPreview.recommendationExaQueries || [])],
+    };
+    setRecModalOpen(false);
+    setSidebarSection("vertical");
+    setActiveTab("discover");
+  };
+
   const loadSavedRows = useCallback(() => {
     fetch("/api/universe?savedOnly=1&limit=500")
       .then((r) => r.json())
@@ -121,7 +332,7 @@ export default function CompanySourcingTool() {
   }, []);
 
   const loadUniverseRows = useCallback(() => {
-    fetch("/api/universe?limit=200")
+    fetch("/api/universe?limit=500&offset=0")
       .then((r) => r.json())
       .then((d) => {
         setUniverseRows(d.companies || []);
@@ -133,6 +344,18 @@ export default function CompanySourcingTool() {
       });
   }, []);
 
+  const loadMoreUniverse = useCallback(() => {
+    const offset = universeRows.length;
+    fetch(`/api/universe?limit=500&offset=${offset}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const next = d.companies || [];
+        setUniverseRows((prev) => [...prev, ...next]);
+        setUniverseTotal(d.total || 0);
+      })
+      .catch(() => {});
+  }, [universeRows.length]);
+
   useEffect(() => {
     loadSavedRows();
   }, [loadSavedRows]);
@@ -141,9 +364,33 @@ export default function CompanySourcingTool() {
     if (activeTab === "universe") loadUniverseRows();
   }, [activeTab, loadUniverseRows]);
 
-  const toggleTag = (group, tag) => setSelectedTags(prev => { const c=prev[group]||[]; return {...prev,[group]:c.includes(tag)?c.filter(t=>t!==tag):[...c,tag]}; });
-  const toggleVertical = v => setSelectedVerticals(prev => prev.includes(v)?prev.filter(x=>x!==v):[...prev,v]);
-  const allSelectedTags = Object.values(selectedTags).flat();
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const toggleSavedContact = (id) =>
+    setSavedContactExpanded((p) => ({ ...p, [id]: !p[id] }));
+
+  const toggleTag = (productName, group, tag) =>
+    setSelectedTagsByProduct((prev) => {
+      const prod = prev[productName] || {};
+      const c = prod[group] || [];
+      const nextTags = c.includes(tag) ? c.filter((t) => t !== tag) : [...c, tag];
+      return { ...prev, [productName]: { ...prod, [group]: nextTags } };
+    });
+
+  const allSelectedTags = selectedProducts.flatMap((p) =>
+    Object.values(selectedTagsByProduct[p] || {}).flat()
+  );
+  const toggleVertical = (v) =>
+    setSelectedVerticals((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
 
   const updateMeta = (id,field,val) => setCompanyMeta(prev=>({...prev,[id]:{...(prev[id]||defaultMeta()),[field]:val}}));
 
@@ -196,15 +443,17 @@ export default function CompanySourcingTool() {
     allSelectedTags.length +
     selectedVerticals.length +
     (ownershipFilter !== "Any Ownership" ? 1 : 0) +
+    (companyTypeFilter !== "Any Type" ? 1 : 0) +
     (revenueFilter !== "Any Revenue" ? 1 : 0) +
     (sizeFilter !== "Any Size" ? 1 : 0) +
     (foundedFilter !== "Any Era" ? 1 : 0) +
     thesisFilterCount;
 
   const clearAll = () => {
-    setSelectedTags({});
+    setSelectedTagsByProduct({});
     setSelectedVerticals([]);
     setOwnershipFilter("Any Ownership");
+    setCompanyTypeFilter("Any Type");
     setRevenueFilter("Any Revenue");
     setSizeFilter("Any Size");
     setFoundedFilter("Any Era");
@@ -215,41 +464,79 @@ export default function CompanySourcingTool() {
     setMinOwnershipConfidence(0);
   };
 
+  const applyIdealProfile = () => {
+    setFoundedFilter("Before 2017 (ideal)");
+    setSizeFilter("15-100 (ideal)");
+    setRevenueFilter("$2M-$10M (ideal)");
+    setThesisRequireProprietary(true);
+    setThesisRequireMissionCritical(true);
+    setMinOwnershipConfidence(0.5);
+  };
+
+  const resetIdealProfile = () => {
+    setFoundedFilter("Any Era");
+    setSizeFilter("Any Size");
+    setRevenueFilter("Any Revenue");
+    setThesisRequireProprietary(false);
+    setThesisRequireMissionCritical(false);
+    setMinOwnershipConfidence(0);
+  };
+
   const runSearch = async (findMore = false) => {
     setSearching(true);
     setSearchDone(false);
     setSearchError("");
     if (!findMore) setSearchResults([]);
     setSearchLog("Starting deterministic pipeline…");
+    setSearchProgress(null);
     try {
       const excludeDomains = findMore
         ? searchResults.map((c) => c.domain).filter(Boolean)
         : [];
+      const discoveryBoostSnap = pendingDiscoveryBoostRef.current;
+      const payload = {
+        activeProduct,
+        selectedProducts,
+        selectedTagsByProduct,
+        selectedTags: allSelectedTags,
+        selectedVerticals,
+        ownershipFilter,
+        revenueFilter,
+        sizeFilter,
+        foundedFilter,
+        excludeDomains,
+        maxCompanies,
+        breadth,
+        settings: { llmProvider },
+        thesis: {
+          requireMissionCritical: thesisRequireMissionCritical,
+          requireVerticallyIntegrated: thesisRequireVertIntegrated,
+          requireProprietary: thesisRequireProprietary,
+          requireFounderVintage: thesisRequireFounderVintage,
+          minOwnershipConfidence,
+        },
+        ...(discoveryBoostSnap
+          ? {
+              additionalSearchQueries: discoveryBoostSnap.additionalSearchQueries,
+              recommendationExaQueries: discoveryBoostSnap.recommendationExaQueries,
+            }
+          : {}),
+      };
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          activeProduct,
-          selectedVerticals,
-          selectedTags: allSelectedTags,
-          ownershipFilter,
-          revenueFilter,
-          sizeFilter,
-          foundedFilter,
-          excludeDomains,
-          settings: { llmProvider },
-          thesis: {
-            requireMissionCritical: thesisRequireMissionCritical,
-            requireVerticallyIntegrated: thesisRequireVertIntegrated,
-            requireProprietary: thesisRequireProprietary,
-            requireFounderVintage: thesisRequireFounderVintage,
-            minOwnershipConfidence,
-          },
-        }),
+        body: JSON.stringify(payload),
       });
-      if (!res.ok) throw new Error(`Search HTTP ${res.status}`);
+      if (!res.ok) {
+        pendingDiscoveryBoostRef.current = discoveryBoostSnap;
+        throw new Error(`Search HTTP ${res.status}`);
+      }
       const { jobId } = await res.json();
-      if (!jobId) throw new Error("No jobId returned");
+      if (!jobId) {
+        pendingDiscoveryBoostRef.current = discoveryBoostSnap;
+        throw new Error("No jobId returned");
+      }
+      pendingDiscoveryBoostRef.current = null;
 
       await new Promise((r) => setTimeout(r, 80));
 
@@ -258,6 +545,11 @@ export default function CompanySourcingTool() {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.type === "log") setSearchLog(msg.message || "");
+          if (msg.type === "browserConsole" && typeof msg.message === "string") {
+            if (msg.level === "warn") console.warn(msg.message);
+            else console.log(msg.message);
+          }
+          if (msg.type === "progress") setSearchProgress({ processed: msg.processed, total: msg.total });
           if (msg.type === "company" && msg.company) {
             setSearchResults((prev) => {
               const c = msg.company;
@@ -275,11 +567,13 @@ export default function CompanySourcingTool() {
             es.close();
             setSearching(false);
             setSearchDone(true);
+            setSearchProgress(null);
           }
           if (msg.type === "done") {
             es.close();
             setSearching(false);
             setSearchDone(true);
+            setSearchProgress(null);
             loadUniverseRows();
             loadSavedRows();
           }
@@ -292,11 +586,13 @@ export default function CompanySourcingTool() {
         setSearching(false);
         setSearchDone(true);
         setSearchError("Stream disconnected");
+        setSearchProgress(null);
       };
     } catch (e) {
       setSearchError(e.message || "Search failed");
       setSearching(false);
       setSearchDone(true);
+      setSearchProgress(null);
     }
   };
 
@@ -340,6 +636,19 @@ export default function CompanySourcingTool() {
         "Founder Still CEO": String(c.founderStillOperating ?? ""),
         "Ownership Confidence": c.ownership_confidence ?? "",
         "Classification Source": c.classificationSource || "",
+        "Age score": c.ageScore ?? "",
+        "Employee score": c.employeeScore ?? "",
+        "Revenue score": c.revenueScore ?? "",
+        "Company Type": c.companyType || "",
+        "Company Type Confidence": typeof c.companyTypeConfidence === "number" ? c.companyTypeConfidence : "",
+        "Company Type Bonus": c.companyTypeBonus ?? "",
+        "Matched products": (c.matchedProducts || []).join("; "),
+        Leadership: (c.leadership || []).map((L) => `${L.name} (${L.title})`).join("; "),
+        HQ: c.hq || "",
+        "Pricing model": c.pricingModel || "",
+        "Tech hints": (c.techHints || []).join("; "),
+        LinkedIn: c.social?.linkedin || "",
+        "Headcount hint": c.employeesText || "",
         "Sources Found Via": (c.sourceTags || []).join(" · "),
         "Source URLs": (c.sources || []).join(" | "),
         "Contact Name": m.contactName,
@@ -375,10 +684,23 @@ export default function CompanySourcingTool() {
       { wch: 14 },
       { wch: 18 },
       { wch: 40 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
       { wch: 20 },
       { wch: 18 },
       { wch: 28 },
       { wch: 40 },
+      { wch: 8 },
+      { wch: 8 },
+      { wch: 8 },
+      { wch: 28 },
+      { wch: 36 },
+      { wch: 28 },
+      { wch: 16 },
+      { wch: 32 },
+      { wch: 28 },
+      { wch: 22 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Sourcing");
@@ -387,21 +709,81 @@ export default function CompanySourcingTool() {
     setTimeout(() => setExportFlash(false), 1800);
   };
 
-  const prodData = SOFTWARE_PRODUCTS[activeProduct];
-  const ownerColor = {
-    "VC-Backed": "#4af0c4",
-    "Private Equity": "#c44af0",
-    "Founder-Owned": "#f0c44a",
-    "Founder-Operated": "#f0c44a",
-    "Vintage PE": "#c44af0",
-    "Recent PE": "#9a7af0",
-    Unknown: "#5a5a7a",
-    Acquired: "#f08a4a",
-    "Family-Owned": "#4a8af0",
-    "Employee-Owned (ESOP)": "#f04a8a",
-    "Publicly Traded": "#8af04a",
-  };
-  const qualityColor = { Bronze: "#cd7f32", Silver: "#c0c0c0", Gold: "#ffd700", Platinum: "#e5e4e2" };
+  const commandItems = useMemo(
+    () => [
+      {
+        id: "filters",
+        label: "Open filters",
+        group: "Layout",
+        keywords: "drawer",
+        action: () => setFilterDrawerOpen(true),
+      },
+      {
+        id: "settings",
+        label: "Open settings",
+        group: "Layout",
+        action: () => setSettingsOpen(true),
+      },
+      {
+        id: "theme",
+        label: theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+        group: "Layout",
+        action: () => toggleTheme(),
+      },
+      {
+        id: "discover",
+        label: "Go to Discover",
+        group: "Navigate",
+        action: () => setActiveTab("discover"),
+      },
+      {
+        id: "saved",
+        label: "Go to Saved",
+        group: "Navigate",
+        action: () => setActiveTab("saved"),
+      },
+      {
+        id: "universe",
+        label: "Go to Universe",
+        group: "Navigate",
+        action: () => setActiveTab("universe"),
+      },
+      {
+        id: "focus-results",
+        label: "Focus results search",
+        group: "Discover",
+        keywords: "filter find",
+        action: () => {
+          setActiveTab("discover");
+          setTimeout(() => resultsFilterInputRef.current?.focus(), 0);
+        },
+      },
+      {
+        id: "run-search",
+        label: "Run search",
+        group: "Discover",
+        keywords: "scan pipeline",
+        action: () => {
+          if (!searching) runSearch(false);
+        },
+      },
+      {
+        id: "find-more",
+        label: "Find more (exclude current)",
+        group: "Discover",
+        action: () => {
+          if (!searching && searchResults.length) runSearch(true);
+        },
+      },
+      {
+        id: "export",
+        label: "Export to Excel",
+        group: "Saved",
+        action: () => exportToExcel(),
+      },
+    ],
+    [searching, searchResults.length, theme, toggleTheme, runSearch, exportToExcel],
+  );
 
   const displayedResults = searchResults
     .filter((c) => {
@@ -411,7 +793,8 @@ export default function CompanySourcingTool() {
           !c.name.toLowerCase().includes(q) &&
           !(c.description || "").toLowerCase().includes(q) &&
           !(c.verticals || []).some((v) => v.toLowerCase().includes(q)) &&
-          !(c.sourceTags || []).some((s) => String(s).toLowerCase().includes(q))
+          !(c.sourceTags || []).some((s) => String(s).toLowerCase().includes(q)) &&
+          !(c.matchedProducts || []).some((p) => String(p).toLowerCase().includes(q))
         )
           return false;
       }
@@ -419,8 +802,9 @@ export default function CompanySourcingTool() {
         const oc = c.ownership_class || c.ownership;
         if (oc !== ownershipFilter) return false;
       }
-      if (revenueFilter !== "Any Revenue" && c.revenue && c.revenue !== revenueFilter) return false;
-      if (sizeFilter !== "Any Size" && c.employees && c.employees !== sizeFilter) return false;
+      if (!matchesCompanyTypeFilter(c, companyTypeFilter)) return false;
+      if (revenueFilter !== "Any Revenue" && !matchesRevenueFilter(c, revenueFilter)) return false;
+      if (sizeFilter !== "Any Size" && !matchesEmployeeFilter(c, sizeFilter)) return false;
       if (!inFoundedEra(c.foundedYear, foundedFilter)) return false;
       if (thesisRequireMissionCritical && !c.missionCritical) return false;
       if (thesisRequireVertIntegrated && !c.verticallyIntegrated) return false;
@@ -436,476 +820,1141 @@ export default function CompanySourcingTool() {
     .sort((a, b) => (b.score || 0) - (a.score || 0));
 
   return (
-    <div style={{fontFamily:"'DM Mono','Courier New',monospace",background:"#0a0a0f",minHeight:"100vh",color:"#e8e4d9"}}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap');
-        *{box-sizing:border-box;margin:0;padding:0}
-        ::-webkit-scrollbar{width:4px;height:4px}
-        ::-webkit-scrollbar-track{background:#0a0a0f}
-        ::-webkit-scrollbar-thumb{background:#1e1e30;border-radius:2px}
-        .tag-btn{cursor:pointer;border:1px solid #1e1e30;background:transparent;color:#6a6a8a;padding:4px 10px;border-radius:3px;font-family:inherit;font-size:11px;letter-spacing:.04em;transition:all .15s;white-space:nowrap}
-        .tag-btn:hover{border-color:#c4f04a;color:#c4f04a}
-        .tag-btn.active{border-color:#c4f04a;background:rgba(196,240,74,.1);color:#c4f04a}
-        .vert-btn{cursor:pointer;border:1px solid #1e1e30;background:transparent;color:#6a6a8a;padding:5px 10px;border-radius:3px;font-family:inherit;font-size:11px;transition:all .15s;text-align:left;width:100%;display:flex;align-items:center;gap:6px}
-        .vert-btn:hover{border-color:#f0844a;color:#f0844a}
-        .vert-btn.active{border-color:#f0844a;background:rgba(240,132,74,.1);color:#f0844a}
-        .prod-btn{cursor:pointer;background:transparent;border:none;border-left:2px solid transparent;color:#4a4a6a;font-family:'Syne',sans-serif;font-size:11px;font-weight:600;letter-spacing:.05em;padding:7px 12px;text-transform:uppercase;transition:all .18s;display:flex;align-items:center;gap:8px;width:100%;text-align:left}
-        .prod-btn:hover{color:#c8c4b8;border-left-color:#2a2a4a}
-        .prod-btn.active{color:#c4f04a;border-left-color:#c4f04a;background:rgba(196,240,74,.04)}
-        .sidebar-tab{cursor:pointer;background:transparent;border:none;border-bottom:2px solid transparent;color:#4a4a6a;font-family:'Syne',sans-serif;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:9px 0;transition:all .2s;flex:1}
-        .sidebar-tab:hover{color:#9a9ab8}
-        .sidebar-tab.active{color:#e8e4d9;border-bottom-color:#e8e4d9}
-        .card{border:1px solid #131320;background:#0d0d1a;border-radius:5px;padding:15px 17px;transition:all .18s}
-        .card:hover{border-color:#1e1e35;background:#10101f}
-        .card.expanded{border-color:rgba(196,240,74,.2);background:#10101f}
-        .score-ring{width:33px;height:33px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:'Syne',sans-serif;flex-shrink:0}
-        .save-btn{background:transparent;border:1px solid #1e1e30;color:#4a4a6a;padding:4px 11px;border-radius:3px;cursor:pointer;font-family:inherit;font-size:11px;transition:all .15s;flex-shrink:0}
-        .save-btn:hover{border-color:#c4f04a;color:#c4f04a}
-        .save-btn.saved{border-color:#c4f04a;background:rgba(196,240,74,.1);color:#c4f04a}
-        .sel{background:#0d0d1a;border:1px solid #131320;color:#8a8aaa;padding:6px 8px;border-radius:3px;font-family:inherit;font-size:11px;cursor:pointer;outline:none;width:100%;transition:border-color .15s}
-        .sel:hover,.sel:focus{border-color:#1e1e35;color:#e8e4d9}
-        .main-tab{background:transparent;border:none;color:#4a4a6a;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:10px 16px;cursor:pointer;transition:all .2s;border-bottom:2px solid transparent}
-        .main-tab:hover{color:#e8e4d9}
-        .main-tab.active{color:#c4f04a;border-bottom-color:#c4f04a}
-        .clr{background:transparent;border:1px solid #1e1e30;color:#6a6a8a;padding:5px 12px;border-radius:3px;font-family:inherit;font-size:10px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:all .15s;width:100%}
-        .clr:hover{border-color:#ff6b6b;color:#ff6b6b}
-        .search-btn{background:#c4f04a;color:#0a0a0f;border:none;padding:11px 22px;border-radius:4px;font-family:'Syne',sans-serif;font-weight:800;font-size:12px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:8px;white-space:nowrap}
-        .search-btn:hover{background:#d4ff5a;transform:translateY(-1px)}
-        .search-btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
-        .export-btn{background:rgba(196,240,74,.1);border:1px solid rgba(196,240,74,.3);color:#c4f04a;padding:7px 16px;border-radius:4px;font-family:'Syne',sans-serif;font-weight:700;font-size:11px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:7px}
-        .export-btn:hover{background:rgba(196,240,74,.18)}
-        .export-btn.flash{background:#c4f04a;color:#0a0a0f}
-        .export-btn:disabled{opacity:.35;cursor:not-allowed}
-        .meta-in{background:#0a0a12;border:1px solid #131320;color:#c8c4b8;padding:5px 8px;border-radius:3px;font-family:inherit;font-size:11px;width:100%;outline:none;transition:border-color .15s}
-        .meta-in:focus{border-color:#2a2a4a}
-        .meta-in::placeholder{color:#222235}
-        .meta-sel{background:#0a0a12;border:1px solid #131320;color:#c8c4b8;padding:5px 8px;border-radius:3px;font-family:inherit;font-size:11px;width:100%;outline:none;cursor:pointer}
-        .pulse{animation:pulse 1.5s ease-in-out infinite}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-        .spin{animation:spin 1.2s linear infinite;display:inline-block}
-        @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-        .fi{animation:fi .3s ease-out}
-        @keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        .srch{background:transparent;border:none;color:#e8e4d9;font-family:inherit;font-size:13px;outline:none;width:100%}
-        .srch::placeholder{color:#222235}
-        .fl{font-size:9px;color:#3a3a5a;letter-spacing:.16em;text-transform:uppercase;margin-bottom:5px;margin-top:11px;display:block}
-        .scan-row{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(196,240,74,.04);border:1px solid rgba(196,240,74,.1);border-radius:4px;font-size:11px;color:#6a8a6a}
-        .gear-btn{cursor:pointer;background:transparent;border:1px solid #1e1e30;color:#6a6a8a;padding:4px 10px;border-radius:3px;font-size:11px}
-        .gear-btn:hover{border-color:#c4f04a;color:#c4f04a}
-        .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
-        .modal-box{background:#0d0d1a;border:1px solid #1a1a2a;border-radius:8px;max-width:420px;width:100%;padding:18px 20px}
-        .chk-row{display:flex;align-items:center;gap:8px;font-size:11px;color:#8a8aaa;margin-top:6px;cursor:pointer}
-      `}</style>
+    <DashboardShell>
+      <AppBar
+        onOpenFilters={() => setFilterDrawerOpen(true)}
+        activeFilterCount={activeFilterCount}
+        searchDone={searchDone}
+        searchResultsLength={searchResults.length}
+        savedCount={savedRows.length}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleTheme={toggleTheme}
+        theme={theme}
+        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+      />
 
-      {/* ── Header ── */}
-      <div style={{borderBottom:"1px solid #131320",padding:"12px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:12}}>
-          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:"#e8e4d9",letterSpacing:"-0.02em"}}>SOURCE</span>
-          <span style={{fontSize:10,color:"#222235",letterSpacing:"0.2em",textTransform:"uppercase"}}>Software Intelligence</span>
-        </div>
-        <div style={{display:"flex",gap:7,alignItems:"center"}}>
-          <button type="button" className="gear-btn" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
-          {activeFilterCount>0&&<div style={{background:"rgba(240,132,74,.08)",border:"1px solid rgba(240,132,74,.2)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#f0844a"}}>{activeFilterCount} filter{activeFilterCount>1?"s":""} active</div>}
-          {searchDone&&<div style={{background:"rgba(196,240,74,.06)",border:"1px solid rgba(196,240,74,.15)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#c4f04a"}}>{searchResults.length} found</div>}
-          <div style={{background:"rgba(196,240,74,.06)",border:"1px solid rgba(196,240,74,.15)",borderRadius:3,padding:"3px 9px",fontSize:11,color:"#c4f04a"}}>{savedRows.length} saved</div>
-        </div>
-      </div>
-
-      <div style={{display:"flex",height:"calc(100vh - 48px)"}}>
-
-        {/* ── Sidebar ── */}
-        <div style={{width:215,borderRight:"1px solid #131320",display:"flex",flexDirection:"column",flexShrink:0}}>
-          <div style={{display:"flex",borderBottom:"1px solid #131320",padding:"0 14px"}}>
-            {[["product","Product"],["vertical","Vertical"],["company","Company"]].map(([id,lbl])=>(
-              <button key={id} className={`sidebar-tab ${sidebarSection===id?"active":""}`} onClick={()=>setSidebarSection(id)}>{lbl}</button>
-            ))}
-          </div>
-          <div style={{flex:1,overflowY:"auto",padding:"12px 0"}}>
-            {sidebarSection==="product"&&(
-              <div className="fi">
-                <div style={{fontSize:9,color:"#222235",letterSpacing:"0.18em",textTransform:"uppercase",padding:"0 14px 10px"}}>Software Type</div>
-                {Object.entries(SOFTWARE_PRODUCTS).map(([name,data])=>(
-                  <button key={name} className={`prod-btn ${activeProduct===name?"active":""}`}
-                    onClick={()=>{setActiveProduct(name);setSelectedTags({});setSearchResults([]);setSearchDone(false);setSearchLog("");}}
-                    title={data.description}>
-                    <span style={{fontSize:12,flexShrink:0}}>{data.icon}</span><span style={{lineHeight:1.3}}>{name}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {sidebarSection==="vertical"&&(
-              <div className="fi" style={{padding:"0 12px"}}>
-                <div style={{fontSize:9,color:"#222235",letterSpacing:"0.18em",textTransform:"uppercase",marginBottom:10}}>Industry Verticals</div>
-                <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                  {VERTICALS.map(v=>(
-                    <button key={v} className={`vert-btn ${selectedVerticals.includes(v)?"active":""}`} onClick={()=>toggleVertical(v)}>
-                      <span style={{width:12,opacity:selectedVerticals.includes(v)?1:0,flexShrink:0}}>✓</span>{v}
-                    </button>
-                  ))}
-                </div>
-                {selectedVerticals.length>0&&<button className="clr" style={{marginTop:12}} onClick={()=>setSelectedVerticals([])}>Clear ({selectedVerticals.length})</button>}
-              </div>
-            )}
-            {sidebarSection==="company"&&(
-              <div className="fi" style={{padding:"0 12px"}}>
-                <div style={{fontSize:9,color:"#222235",letterSpacing:"0.18em",textTransform:"uppercase",marginBottom:4}}>Company Attributes</div>
-                <span className="fl" style={{marginTop:10}}>Ownership</span>
-                <select className="sel" value={ownershipFilter} onChange={e=>setOwnershipFilter(e.target.value)}>{OWNERSHIP_TYPES.map(s=><option key={s}>{s}</option>)}</select>
-                <span className="fl">Revenue</span>
-                <select className="sel" value={revenueFilter} onChange={e=>setRevenueFilter(e.target.value)}>{REVENUE_RANGES.map(s=><option key={s}>{s}</option>)}</select>
-                <span className="fl">Employees</span>
-                <select className="sel" value={sizeFilter} onChange={e=>setSizeFilter(e.target.value)}>{EMPLOYEE_RANGES.map(s=><option key={s}>{s}</option>)}</select>
-                <span className="fl">Year Founded</span>
-                <select className="sel" value={foundedFilter} onChange={e=>setFoundedFilter(e.target.value)}>{FOUNDED_RANGES.map(s=><option key={s}>{s}</option>)}</select>
-                <div style={{fontSize:9,color:"#222235",letterSpacing:"0.18em",textTransform:"uppercase",marginTop:14,marginBottom:6}}>PE thesis filters</div>
-                <label className="chk-row"><input type="checkbox" checked={thesisRequireMissionCritical} onChange={e=>setThesisRequireMissionCritical(e.target.checked)}/> Mission-critical</label>
-                <label className="chk-row"><input type="checkbox" checked={thesisRequireVertIntegrated} onChange={e=>setThesisRequireVertIntegrated(e.target.checked)}/> Vertically integrated</label>
-                <label className="chk-row"><input type="checkbox" checked={thesisRequireProprietary} onChange={e=>setThesisRequireProprietary(e.target.checked)}/> Proprietary stack</label>
-                <label className="chk-row"><input type="checkbox" checked={thesisRequireFounderVintage} onChange={e=>setThesisRequireFounderVintage(e.target.checked)}/> Founder-op or vintage PE</label>
-                <span className="fl">Min ownership confidence</span>
-                <input type="range" min={0} max={1} step={0.05} value={minOwnershipConfidence} onChange={e=>setMinOwnershipConfidence(Number(e.target.value))} style={{width:"100%"}}/>
-                <div style={{fontSize:10,color:"#3a3a5a",marginTop:2}}>{minOwnershipConfidence.toFixed(2)}</div>
-                {activeFilterCount>0&&<button className="clr" style={{marginTop:14}} onClick={clearAll}>Clear all filters</button>}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ── Main ── */}
-        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-
-          {/* Tab bar */}
-          <div style={{borderBottom:"1px solid #131320",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px"}}>
-            <div style={{display:"flex"}}>
-              {[["discover","Discover"],["saved",`Saved (${savedRows.length})`],["universe",`Universe (${universeTotal})`]].map(([id,lbl])=>(
-                <button key={id} className={`main-tab ${activeTab===id?"active":""}`} onClick={()=>setActiveTab(id)}>{lbl}</button>
-              ))}
-            </div>
-            {activeTab==="saved"&&(
-              <button className={`export-btn ${exportFlash?"flash":""}`} onClick={exportToExcel} disabled={!savedRows.length}>
-                <span>↓</span>{exportFlash?"Exported!":"Export to Excel"}
+      <div className="flex min-h-0 min-h-[calc(100vh-57px)] flex-1 flex-col">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 md:px-6">
+          <nav className="flex min-w-0">
+            {[
+              ["discover", "Discover"],
+              ["saved", `Saved (${savedRows.length})`],
+              ["universe", `Universe (${universeTotal})`],
+            ].map(([id, lbl]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveTab(id)}
+                className={`border-b-2 px-3 py-3 text-ui font-semibold transition-colors sm:px-4 ${
+                  activeTab === id
+                    ? "border-primary text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {lbl}
               </button>
-            )}
-          </div>
+            ))}
+          </nav>
+          {activeTab === "saved" && (
+            <div className="mb-2 flex flex-wrap items-center justify-end gap-2 sm:mb-0">
+              <button
+                type="button"
+                onClick={() => fetchSimilarRecommendations()}
+                disabled={recLoading || !savedRows.length}
+                className="inline-flex items-center gap-2 rounded-md border border-primary/40 px-3 py-2 text-data font-semibold text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {recLoading ? "…" : "Suggest similar"}
+              </button>
+              <button
+                type="button"
+                onClick={exportToExcel}
+                disabled={!savedRows.length}
+                className={`inline-flex items-center gap-2 rounded-md border border-primary/30 px-3 py-2 text-data font-semibold transition-colors sm:mb-0 ${
+                  exportFlash
+                    ? "bg-primary text-primary-foreground"
+                    : "text-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                }`}
+              >
+                {exportFlash ? "Exported" : "Export Excel"}
+              </button>
+            </div>
+          )}
+        </div>
 
-          {/* Capability filter bar */}
-          {activeTab==="discover"&&(
-            <div style={{borderBottom:"1px solid #131320",padding:"9px 20px",display:"flex",flexDirection:"column",gap:7,background:"#08080e"}}>
-              <div style={{fontSize:10,color:"#c4f04a",letterSpacing:"0.1em",textTransform:"uppercase",fontFamily:"'Syne',sans-serif",fontWeight:700}}>
-                {prodData.icon} {activeProduct}
-                <span style={{marginLeft:10,fontSize:10,color:"#2a2a4a",fontFamily:"'DM Mono',monospace",fontWeight:400,textTransform:"none",letterSpacing:0}}>{prodData.description}</span>
-              </div>
-              {Object.entries(prodData.filters).map(([group,tags])=>(
-                <div key={group} style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                  <span style={{fontSize:9,color:"#2a2a4a",letterSpacing:".14em",textTransform:"uppercase",minWidth:110,flexShrink:0}}>{group}</span>
-                  {tags.map(tag=>(
-                    <button key={tag} className={`tag-btn ${(selectedTags[group]||[]).includes(tag)?"active":""}`} onClick={()=>toggleTag(group,tag)}>{tag}</button>
-                  ))}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-6">
+          {activeTab === "discover" && (
+            <div className="animate-in-fade space-y-4">
+              <div className="rounded-lg border border-border bg-card p-4 md:p-5 shadow-sm">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0 flex-1 space-y-3">
+                    <h1 className="text-ui font-semibold tracking-tight text-foreground">
+                      Find companies
+                    </h1>
+                    <p className="text-data leading-relaxed text-muted-foreground">
+                      Discovery is <span className="text-foreground/90">vertical-first</span>, then product filters narrow sources. Deterministic pipeline (PE portfolios, directories, optional Brave/Exa in{" "}
+                      <code>.env</code>
+                      ). Configure filters from the drawer — keyboard <kbd className="rounded border border-border bg-muted px-1 font-mono text-[10px]">⌘K</kbd> for commands.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setFilterDrawerOpen(true)}
+                      className="text-left text-data text-primary hover:underline"
+                    >
+                      {activeFilterCount === 0
+                        ? "No filters applied · Add filters"
+                        : `${activeFilterCount} filter${activeFilterCount === 1 ? "" : "s"} active · Edit filters`}
+                    </button>
+                  </div>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center lg:flex-col lg:items-stretch">
+                    <button
+                      type="button"
+                      onClick={() => runSearch(false)}
+                      disabled={searching}
+                      className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-5 py-2.5 text-ui font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {searching ? (
+                        <>
+                          <span className="animate-spin-slow inline-block">◌</span>
+                          Scanning…
+                        </>
+                      ) : (
+                        <>
+                          <span aria-hidden>⌕</span>
+                          Search all sources
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => fetchSimilarRecommendations()}
+                      disabled={searching || recLoading || savedRows.length === 0}
+                      className="rounded-md border border-primary/40 bg-background px-4 py-2.5 text-ui font-medium text-primary shadow-sm transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Use saved companies to suggest verticals and extra search queries"
+                    >
+                      {recLoading ? "Analyzing…" : "Suggest similar"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => runSearch(true)}
+                      disabled={searching || !searchResults.length}
+                      className="rounded-md border border-border bg-background px-4 py-2.5 text-ui font-medium text-foreground shadow-sm transition-colors hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Exclude current domains and run again"
+                    >
+                      Find more
+                    </button>
+                  </div>
                 </div>
-              ))}
-              {selectedVerticals.length>0&&(
-                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                  <span style={{fontSize:9,color:"#2a2a4a",letterSpacing:".14em",textTransform:"uppercase",minWidth:110,flexShrink:0}}>Verticals</span>
-                  {selectedVerticals.map(v=>(
-                    <button key={v} style={{cursor:"pointer",border:"1px solid rgba(240,132,74,.4)",background:"rgba(240,132,74,.07)",color:"#f0844a",padding:"4px 9px",borderRadius:3,fontFamily:"inherit",fontSize:11}} onClick={()=>toggleVertical(v)}>✕ {v}</button>
-                  ))}
+
+                {searching && (
+                  <div className="mt-4 space-y-2 rounded-md border border-primary/25 bg-primary/5 p-3 text-data text-foreground">
+                    <div className="flex items-center gap-2">
+                      <span className="bg-primary size-2 shrink-0 animate-pulse-soft rounded-full" aria-hidden />
+                      <span>{searchLog}</span>
+                    </div>
+                    {searchProgress && searchProgress.total > 0 && (
+                      <p className="text-muted-foreground">
+                        Progress: {searchProgress.processed} / {searchProgress.total} enriched
+                      </p>
+                    )}
+                  </div>
+                )}
+                {searchError && (
+                  <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-data text-destructive">
+                    {searchError}
+                  </div>
+                )}
+              </div>
+
+              {displayedResults.length > 0 && (
+                <>
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2 shadow-sm">
+                    <span className="text-muted-foreground" aria-hidden>
+                      ⌕
+                    </span>
+                    <input
+                      ref={resultsFilterInputRef}
+                      className="min-w-0 flex-1 bg-transparent text-data text-foreground outline-none placeholder:text-muted-foreground"
+                      placeholder={`Filter ${displayedResults.length} results…`}
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                    />
+                    <span className="shrink-0 tabular-nums text-data text-muted-foreground">
+                      {displayedResults.length} shown
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-3">
+                    {displayedResults.map((c) => {
+                      const isExp = expandedCompany === c.id;
+                      const isSaved = !!c.is_saved;
+                      const ownLabel = c.ownership_class || c.ownership;
+                      const ownCls = ownerBadgeClasses(ownLabel);
+                      const scoreCls = scoreTierClasses(c.score);
+                      const ctBad = companyTypeBadge(c.companyType);
+                      const triageBtn = (field, val) => (
+                        <button
+                          type="button"
+                          className="rounded border border-border px-2 py-1 text-data text-muted-foreground hover:bg-muted hover:text-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            patchClassify(c.id, { [field]: val });
+                          }}
+                        >
+                          {val}
+                        </button>
+                      );
+                      return (
+                        <div
+                          key={c.id}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setExpandedCompany(isExp ? null : c.id);
+                            }
+                          }}
+                          onClick={() => setExpandedCompany(isExp ? null : c.id)}
+                          className={`cursor-pointer rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/30 ${
+                            isExp ? "ring-2 ring-primary/20" : ""
+                          }`}
+                        >
+                          <div className="flex gap-3">
+                            <div
+                              className={`flex size-9 shrink-0 items-center justify-center rounded-full border text-data font-semibold ${scoreCls}`}
+                            >
+                              {c.score ?? "—"}
+                            </div>
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <span className="text-ui font-semibold text-foreground">{c.name}</span>
+                                  {ownLabel && (
+                                    <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
+                                  )}
+                                  <span
+                                    title={`Company type: ${(c.companyType || "unknown").toLowerCase()}`}
+                                    className={`rounded border px-2 py-0.5 text-data ${ctBad.cls}`}
+                                  >
+                                    {ctBad.lbl}
+                                  </span>
+                                  {c.classificationSource && (
+                                    <span className="text-data text-muted-foreground">{c.classificationSource}</span>
+                                  )}
+                                  {c.foundedYear && (
+                                    <span className="text-data text-muted-foreground">Est. {c.foundedYear}</span>
+                                  )}
+                                  {c.website && (
+                                    <a
+                                      href={c.website}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className={`${pillBase} border-border text-primary`}
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      Website
+                                    </a>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  className={`shrink-0 rounded-md border px-3 py-1 text-data font-medium transition-colors ${
+                                    isSaved
+                                      ? "border-primary/40 bg-primary/10 text-primary"
+                                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                                  }`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    saveCompany(c.id, !isSaved);
+                                  }}
+                                >
+                                  {isSaved ? "Saved" : "Save"}
+                                </button>
+                              </div>
+                              <p className="text-data text-muted-foreground">
+                                MC:{c.missionCritical ? "Y" : "N"} · VI:{c.verticallyIntegrated ? "Y" : "N"} · Prop:
+                                {c.proprietaryStack ? "Y" : "N"}
+                                {typeof c.ownership_confidence === "number" && (
+                                  <span className="ms-2">conf {c.ownership_confidence.toFixed(2)}</span>
+                                )}
+                              </p>
+                              <p className="text-data leading-relaxed text-muted-foreground">{c.description}</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {(c.sourceTags || []).map((s) => (
+                                  <span key={s} className={`${pillBase} border-emerald-500/30 bg-emerald-500/5 text-emerald-900 dark:text-emerald-100`}>
+                                    {s}
+                                  </span>
+                                ))}
+                                {(c.verticals || []).map((v) => (
+                                  <span key={v} className={`${pillBase} border-amber-500/30 bg-amber-500/5 text-amber-900 dark:text-amber-100`}>
+                                    {v}
+                                  </span>
+                                ))}
+                                {(c.matchedProducts || []).map((mp) => (
+                                  <span key={mp} className={`${pillBase} border-violet-500/30 bg-violet-500/5 text-violet-900 dark:text-violet-100`}>
+                                    {mp}
+                                  </span>
+                                ))}
+                                {(c.tags || []).map((t) => (
+                                  <span key={t} className={`${pillBase} border-border bg-muted/50 text-muted-foreground`}>
+                                    {t}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                          {isExp && (
+                            <div className="animate-in-fade mt-4 space-y-4 border-t border-border pt-4">
+                              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                                {[
+                                  ["Founded", c.foundedYear || "—"],
+                                  ["HQ", c.hq || "—"],
+                                  ["Country", c.country || "—"],
+                                  ["Employees", c.employees || "—"],
+                                  ["Revenue", c.revenue || "—"],
+                                ].map(([k, v]) => (
+                                  <div key={k}>
+                                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                      {k}
+                                    </div>
+                                    <div className="text-data text-foreground">{v}</div>
+                                  </div>
+                                ))}
+                              </div>
+                              {(c.matchedProducts || []).length > 0 && (
+                                <p className="text-data text-muted-foreground">
+                                  <span className="font-semibold uppercase tracking-wider text-data">Matched products</span>{" "}
+                                  {(c.matchedProducts || []).join(" · ")}
+                                </p>
+                              )}
+                              {c.companyType && (
+                                <p className="text-data text-muted-foreground">
+                                  Company type {c.companyType} (
+                                  {(typeof c.companyTypeConfidence === "number" ? c.companyTypeConfidence : 0).toFixed(2)}) · bonus{" "}
+                                  {c.companyTypeBonus ?? 0}
+                                </p>
+                              )}
+                              {(typeof c.ageScore === "number" ||
+                                typeof c.employeeScore === "number" ||
+                                typeof c.revenueScore === "number") && (
+                                <p className="text-data text-muted-foreground">
+                                  Score parts — age {c.ageScore ?? "—"} · employees {c.employeeScore ?? "—"} · revenue{" "}
+                                  {c.revenueScore ?? "—"}
+                                </p>
+                              )}
+                              {(c.leadership || []).length > 0 && (
+                                <p className="text-data text-muted-foreground">
+                                  <span className="font-semibold uppercase tracking-wider text-data">Leadership</span>{" "}
+                                  {(c.leadership || []).map((L, i) => (
+                                    <span key={i}>
+                                      {L.name} ({L.title})
+                                      {i < (c.leadership || []).length - 1 ? "; " : ""}
+                                    </span>
+                                  ))}
+                                </p>
+                              )}
+                              {c.employeesText && (
+                                <p className="text-data text-muted-foreground">Headcount hint: {c.employeesText}</p>
+                              )}
+                              {c.pricingModel && <p className="text-data text-muted-foreground">Pricing: {c.pricingModel}</p>}
+                              {(c.techHints || []).length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {(c.techHints || []).map((h) => (
+                                    <span key={h} className={`${pillBase} border-border text-muted-foreground`}>
+                                      {h}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {c.social &&
+                                (c.social.linkedin || c.social.twitter || c.social.youtube || c.social.github) && (
+                                  <div className="flex flex-wrap gap-3 text-data" onClick={(e) => e.stopPropagation()}>
+                                    {c.social.linkedin && (
+                                      <a className="text-primary hover:underline" href={c.social.linkedin} target="_blank" rel="noopener noreferrer">
+                                        LinkedIn
+                                      </a>
+                                    )}
+                                    {c.social.twitter && (
+                                      <a className="text-primary hover:underline" href={c.social.twitter} target="_blank" rel="noopener noreferrer">
+                                        Twitter/X
+                                      </a>
+                                    )}
+                                    {c.social.youtube && (
+                                      <a className="text-primary hover:underline" href={c.social.youtube} target="_blank" rel="noopener noreferrer">
+                                        YouTube
+                                      </a>
+                                    )}
+                                    {c.social.github && (
+                                      <a className="text-primary hover:underline" href={c.social.github} target="_blank" rel="noopener noreferrer">
+                                        GitHub
+                                      </a>
+                                    )}
+                                  </div>
+                                )}
+                              {(c.acquisitionHistory || []).length > 0 && (
+                                <p className="text-data text-muted-foreground">
+                                  <span className="font-semibold uppercase tracking-wider text-data">Acquisitions</span>{" "}
+                                  {(c.acquisitionHistory || []).map((a, i) => (
+                                    <span key={i}>
+                                      {a.year || "?"} {a.acquirer || ""}
+                                      {i < (c.acquisitionHistory || []).length - 1 ? "; " : ""}
+                                    </span>
+                                  ))}
+                                </p>
+                              )}
+                              {(c.missionCriticalReasonLLM || c.verticalIntegrationReasonLLM) && (
+                                <div className="space-y-1 text-data leading-relaxed text-muted-foreground">
+                                  {c.missionCriticalReasonLLM && (
+                                    <p>
+                                      <span className="font-medium text-foreground">LLM MC:</span> {c.missionCriticalReasonLLM}
+                                    </p>
+                                  )}
+                                  {c.verticalIntegrationReasonLLM && (
+                                    <p>
+                                      <span className="font-medium text-foreground">LLM VI:</span> {c.verticalIntegrationReasonLLM}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                              {(c.sources || []).length > 0 && (
+                                <div className="space-y-1 text-data text-muted-foreground">
+                                  {(c.sources || []).slice(0, 6).map((u, i) => (
+                                    <div key={i}>
+                                      <a
+                                        href={u}
+                                        className="break-all text-primary hover:underline"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        {u}
+                                      </a>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="text-data text-muted-foreground">
+                                <div className="mb-2 font-medium text-foreground">Manual triage</div>
+                                <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                  <span>Mission-critical</span>
+                                  {triageBtn("manualMissionCritical", "yes")}
+                                  {triageBtn("manualMissionCritical", "no")}
+                                  {triageBtn("manualMissionCritical", "maybe")}
+                                  {triageBtn("manualMissionCritical", "unset")}
+                                  <span className="ms-2">Vertical</span>
+                                  {triageBtn("manualVerticallyIntegrated", "yes")}
+                                  {triageBtn("manualVerticallyIntegrated", "no")}
+                                  {triageBtn("manualVerticallyIntegrated", "maybe")}
+                                  {triageBtn("manualVerticallyIntegrated", "unset")}
+                                </div>
+                              </div>
+                              {c.homepageTextSample && (
+                                <pre className="max-h-32 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-[11px] leading-relaxed text-muted-foreground">
+                                  {String(c.homepageTextSample).slice(0, 1200)}
+                                </pre>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+
+              {!searching && !searchDone && searchResults.length === 0 && (
+                <div className="py-16 text-center text-muted-foreground">
+                  <div className="mb-3 text-3xl" aria-hidden>
+                    ⌕
+                  </div>
+                  <p className="text-ui font-medium text-foreground">Configure filters and run search</p>
+                  <p className="mt-2 text-data">Use npm run dev. Add Brave/Exa keys in .env for broader coverage.</p>
+                </div>
+              )}
+              {!searching && searchDone && displayedResults.length === 0 && (
+                <div className="py-16 text-center text-muted-foreground">
+                  <p className="text-ui font-medium text-foreground">No results</p>
+                  <p className="mt-2 text-data">Try broader filters in the filter drawer.</p>
                 </div>
               )}
             </div>
           )}
 
-          {/* Content */}
-          <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
-
-            {/* ─ Discover ─ */}
-            {activeTab==="discover"&&(
-              <div className="fi">
-
-                {/* Search launcher */}
-                <div style={{background:"#0d0d1a",border:"1px solid #1a1a2a",borderRadius:6,padding:"18px 20px",marginBottom:16}}>
-                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
-                    <div style={{flex:1,minWidth:260}}>
-                      <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#e8e4d9",marginBottom:5}}>
-                        Find Companies
-                      </div>
-                      <div style={{fontSize:12,color:"#3a3a5a",lineHeight:1.6}}>
-                        Deterministic pipeline: PE portfolio pages, trade-association links, G2/Capterra listings, Brave/Exa (optional keys in <code style={{color:"#5a5a7a"}}>.env</code>), homepage scrape, OpenCorporates, and rule-based thesis scoring. Optional LLM classification from Settings.
-                      </div>
-                      <div style={{marginTop:10,display:"flex",gap:8,flexWrap:"wrap"}}>
-                        <span style={{fontSize:11,color:"#c4f04a",background:"rgba(196,240,74,.08)",border:"1px solid rgba(196,240,74,.15)",padding:"3px 9px",borderRadius:3}}>{prodData.icon} {activeProduct}</span>
-                        {selectedVerticals.map(v=><span key={v} style={{fontSize:11,color:"#f0844a",background:"rgba(240,132,74,.08)",border:"1px solid rgba(240,132,74,.15)",padding:"3px 9px",borderRadius:3}}>{v}</span>)}
-                        {allSelectedTags.map(t=><span key={t} style={{fontSize:11,color:"#6a6a8a",background:"#0a0a12",border:"1px solid #1a1a2a",padding:"3px 9px",borderRadius:3}}>{t}</span>)}
-                        {ownershipFilter!=="Any Ownership"&&<span style={{fontSize:11,color:"#9a7af0",background:"rgba(154,122,240,.08)",border:"1px solid rgba(154,122,240,.2)",padding:"3px 9px",borderRadius:3}}>{ownershipFilter}</span>}
-                        {revenueFilter!=="Any Revenue"&&<span style={{fontSize:11,color:"#7af0c4",background:"rgba(122,240,196,.08)",border:"1px solid rgba(122,240,196,.2)",padding:"3px 9px",borderRadius:3}}>{revenueFilter}</span>}
-                        {sizeFilter!=="Any Size"&&<span style={{fontSize:11,color:"#7af0c4",background:"rgba(122,240,196,.08)",border:"1px solid rgba(122,240,196,.2)",padding:"3px 9px",borderRadius:3}}>{sizeFilter} emp</span>}
-                      </div>
-                    </div>
-                    <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
-                    <button className="search-btn" onClick={()=>runSearch(false)} disabled={searching}>
-                      {searching ? <><span className="spin">◌</span>Scanning…</> : <><span>⌕</span>Search All Sources</>}
-                    </button>
-                    <button className="clr" style={{width:"auto",padding:"10px 16px"}} onClick={()=>runSearch(true)} disabled={searching||!searchResults.length} title="Exclude current domains and run again">
-                      Find more
-                    </button>
-                    </div>
-                  </div>
-
-                  {/* Status / progress */}
-                  {searching&&(
-                    <div className="scan-row" style={{marginTop:14}}>
-                      <span className="pulse" style={{width:6,height:6,borderRadius:"50%",background:"#c4f04a",display:"inline-block",flexShrink:0}}/>
-                      <span>{searchLog}</span>
-                    </div>
-                  )}
-                  {searchError&&<div style={{marginTop:12,fontSize:12,color:"#f04a4a",padding:"8px 12px",background:"rgba(240,74,74,.06)",border:"1px solid rgba(240,74,74,.15)",borderRadius:3}}>{searchError}</div>}
+          {activeTab === "saved" && (
+            <div className="animate-in-fade space-y-4">
+              {savedRows.length === 0 ? (
+                <div className="py-16 text-center text-muted-foreground">
+                  <p className="text-ui font-medium text-foreground">No saved companies</p>
+                  <p className="mt-2 text-data">Save leads from Discover.</p>
                 </div>
-
-                {/* Results */}
-                {displayedResults.length > 0 && (
-                  <>
-                    {/* Filter within results */}
-                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,background:"#0d0d1a",border:"1px solid #131320",borderRadius:4,padding:"7px 13px"}}>
-                      <span style={{color:"#222235",fontSize:15}}>⌕</span>
-                      <input className="srch" placeholder={`Filter ${displayedResults.length} results…`} value={searchQuery} onChange={e=>setSearchQuery(e.target.value)}/>
-                      <span style={{fontSize:11,color:"#2a2a4a",flexShrink:0}}>{displayedResults.length} shown</span>
+              ) : (
+                <>
+                  <div className="flex flex-col justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 p-4 sm:flex-row sm:items-center">
+                    <div>
+                      <p className="text-ui font-semibold text-foreground">
+                        {savedRows.length} {savedRows.length === 1 ? "company" : "companies"} in your file
+                      </p>
+                      <p className="mt-1 text-data text-muted-foreground">Add contacts, then export.</p>
                     </div>
-
-                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                      {displayedResults.map(c=>{
-                        const isExp=expandedCompany===c.id;
-                        const isSaved=!!c.is_saved;
-                        const sc=(c.score||0)>=90?"#c4f04a":(c.score||0)>=80?"#4af0c4":(c.score||0)>=70?"#f0c44a":"#f0844a";
-                        const ownLabel = c.ownership_class || c.ownership;
-                        const oc=ownerColor[ownLabel]||"#5a5a7a";
-                        const triageBtn = (field, val) => (
-                          <button type="button" className="save-btn" style={{padding:"2px 6px",fontSize:10}} onClick={(e)=>{e.stopPropagation();patchClassify(c.id,{[field]:val});}}>{val}</button>
-                        );
-                        return (
-                          <div key={c.id} className={`card ${isExp?"expanded":""}`} style={{cursor:"pointer"}} onClick={()=>setExpandedCompany(isExp?null:c.id)}>
-                            <div style={{display:"flex",alignItems:"flex-start",gap:13}}>
-                              <div className="score-ring" style={{background:`${sc}10`,border:`1px solid ${sc}30`,color:sc}}>{c.score ?? "—"}</div>
-                              <div style={{flex:1,minWidth:0}}>
-                                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5,gap:8,flexWrap:"wrap"}}>
-                                  <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
-                                    <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#e8e4d9"}}>{c.name}</span>
-                                    {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
-                                    {c.classificationSource&&<span style={{fontSize:9,color:"#3a3a5a"}}>{c.classificationSource}</span>}
-                                    {c.foundedYear&&<span style={{fontSize:10,color:"#2a2a4a"}}>Est. {c.foundedYear}</span>}
-                                    {c.website&&<a href={c.website} target="_blank" rel="noopener noreferrer" style={{fontSize:10,color:"#3a3a6a",textDecoration:"none",background:"#0a0a12",padding:"2px 7px",borderRadius:2,border:"1px solid #131320"}} onClick={e=>e.stopPropagation()}>↗ website</a>}
-                                  </div>
-                                  <button className={`save-btn ${isSaved?"saved":""}`} onClick={e=>{e.stopPropagation();saveCompany(c.id,!isSaved);}}>
-                                    {isSaved?"✓ Saved":"+ Save"}
-                                  </button>
-                                </div>
-                                <div style={{fontSize:11,color:"#4a4a6a",marginBottom:4}}>
-                                  MC:{c.missionCritical?"Y":"N"} · VI:{c.verticallyIntegrated?"Y":"N"} · Prop:{c.proprietaryStack?"Y":"N"}
-                                  {typeof c.ownership_confidence==="number"&&<span style={{marginLeft:8}}>conf {c.ownership_confidence.toFixed(2)}</span>}
-                                </div>
-                                <div style={{fontSize:12,color:"#565670",marginBottom:8,lineHeight:1.5}}>{c.description}</div>
-                                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                                  {(c.sourceTags||[]).map(s=><span key={s} style={{fontSize:10,color:"#7af0c4",background:"rgba(122,240,196,.08)",padding:"2px 7px",borderRadius:2,border:"1px solid rgba(122,240,196,.2)"}}>{s}</span>)}
-                                  {(c.verticals||[]).map(v=><span key={v} style={{fontSize:10,color:"#f0844a",background:"rgba(240,132,74,.06)",padding:"2px 7px",borderRadius:2,border:"1px solid rgba(240,132,74,.15)"}}>{v}</span>)}
-                                  {(c.tags||[]).map(t=><span key={t} style={{fontSize:10,color:"#2a2a4a",background:"#0a0a12",padding:"2px 7px",borderRadius:2,border:"1px solid #0f0f1e"}}>{t}</span>)}
-                                </div>
-                              </div>
-                            </div>
-                            {isExp&&(
-                              <div className="fi" style={{marginTop:13,paddingTop:13,borderTop:"1px solid #131320"}}>
-                                <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:12}}>
-                                  {[["Founded",c.foundedYear||"—"],["HQ",c.hq||"—"],["Country",c.country||"—"],["Employees",c.employees||"—"],["Revenue",c.revenue||"—"]].map(([k,v])=>(
-                                    <div key={k}><div style={{fontSize:9,color:"#1e1e30",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>{k}</div><div style={{fontSize:12,color:"#b8b4a8"}}>{v}</div></div>
-                                  ))}
-                                </div>
-                                {(c.acquisitionHistory||[]).length>0&&(
-                                  <div style={{fontSize:11,color:"#6a6a8a",marginBottom:8}}>
-                                    <span style={{color:"#2a2a4a",letterSpacing:".12em",textTransform:"uppercase",fontSize:9}}>Acquisitions</span>{" "}
-                                    {(c.acquisitionHistory||[]).map((a,i)=><span key={i}>{a.year||"?"} {a.acquirer||""}{i<(c.acquisitionHistory||[]).length-1?"; ":""}</span>)}
-                                  </div>
-                                )}
-                                {(c.missionCriticalReasonLLM||c.verticalIntegrationReasonLLM)&&(
-                                  <div style={{fontSize:11,color:"#6a6a8a",marginBottom:8,lineHeight:1.5}}>
-                                    {c.missionCriticalReasonLLM&&<div><b style={{color:"#8a8aaa"}}>LLM MC:</b> {c.missionCriticalReasonLLM}</div>}
-                                    {c.verticalIntegrationReasonLLM&&<div><b style={{color:"#8a8aaa"}}>LLM VI:</b> {c.verticalIntegrationReasonLLM}</div>}
-                                  </div>
-                                )}
-                                {(c.sources||[]).length>0&&(
-                                  <div style={{fontSize:10,color:"#3a3a5a",marginBottom:10}}>
-                                    {(c.sources||[]).slice(0,6).map((u,i)=><div key={i} style={{marginTop:3}}><a href={u} target="_blank" rel="noopener noreferrer" style={{color:"#5a5a8a"}} onClick={e=>e.stopPropagation()}>{u}</a></div>)}
-                                  </div>
-                                )}
-                                <div style={{fontSize:10,color:"#8a8aaa",marginBottom:6}}>Manual triage</div>
-                                <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
-                                  <span style={{color:"#3a3a5a"}}>Mission-critical</span>
-                                  {triageBtn("manualMissionCritical","yes")}
-                                  {triageBtn("manualMissionCritical","no")}
-                                  {triageBtn("manualMissionCritical","maybe")}
-                                  {triageBtn("manualMissionCritical","unset")}
-                                  <span style={{color:"#3a3a5a",marginLeft:12}}>Vertical</span>
-                                  {triageBtn("manualVerticallyIntegrated","yes")}
-                                  {triageBtn("manualVerticallyIntegrated","no")}
-                                  {triageBtn("manualVerticallyIntegrated","maybe")}
-                                  {triageBtn("manualVerticallyIntegrated","unset")}
-                                </div>
-                                {c.homepageTextSample&&(
-                                  <pre style={{marginTop:10,maxHeight:120,overflow:"auto",fontSize:9,color:"#4a4a6a",whiteSpace:"pre-wrap",background:"#08080e",padding:8,borderRadius:4,border:"1px solid #131320"}}>{String(c.homepageTextSample).slice(0,1200)}</pre>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-
-                {/* Empty states */}
-                {!searching&&!searchDone&&searchResults.length===0&&(
-                  <div style={{textAlign:"center",padding:"50px 0",color:"#1e1e30"}}>
-                    <div style={{fontSize:32,marginBottom:12}}>⌕</div>
-                    <div style={{fontSize:13,color:"#2a2a4a"}}>Set your filters and click Search All Sources</div>
-                    <div style={{fontSize:11,marginTop:6,color:"#1a1a2a"}}>Run npm run dev (starts API + Vite). Add Brave/Exa keys in .env for more coverage.</div>
-                  </div>
-                )}
-                {!searching&&searchDone&&displayedResults.length===0&&(
-                  <div style={{textAlign:"center",padding:"50px 0",color:"#2a2a4a"}}>
-                    <div style={{fontSize:28,marginBottom:10}}>◌</div>
-                    <div style={{fontSize:13}}>No results found — try broader filters</div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ─ Saved ─ */}
-            {activeTab==="saved"&&(
-              <div className="fi">
-                {savedRows.length===0?(
-                  <div style={{textAlign:"center",padding:"58px 0",color:"#2a2a4a"}}>
-                    <div style={{fontSize:28,marginBottom:10}}>◌</div>
-                    <div style={{fontSize:13}}>No saved companies yet</div>
-                    <div style={{fontSize:11,marginTop:5,color:"#1a1a2a"}}>Search and save companies from Discover</div>
-                  </div>
-                ):(
-                  <>
-                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,padding:"10px 14px",background:"rgba(196,240,74,.04)",border:"1px solid rgba(196,240,74,.1)",borderRadius:4}}>
-                      <div>
-                        <span style={{fontSize:12,color:"#c4f04a",fontFamily:"'Syne',sans-serif",fontWeight:700}}>{savedRows.length} compan{savedRows.length===1?"y":"ies"} in your sourcing file</span>
-                        <span style={{fontSize:11,color:"#3a3a5a",marginLeft:10}}>Fill in contact details, then export</span>
-                      </div>
-                      <button className={`export-btn ${exportFlash?"flash":""}`} onClick={exportToExcel}>
-                        <span>↓</span>{exportFlash?"Exported!":"Export to Excel"}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => fetchSimilarRecommendations()}
+                        disabled={recLoading}
+                        className="rounded-md border border-primary/40 px-4 py-2 text-ui font-semibold text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {recLoading ? "…" : "Suggest similar"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={exportToExcel}
+                        className={`rounded-md border px-4 py-2 text-ui font-semibold transition-colors ${
+                          exportFlash ? "border-primary bg-primary text-primary-foreground" : "border-primary/40 text-primary hover:bg-primary/10"
+                        }`}
+                      >
+                        {exportFlash ? "Exported" : "Export Excel"}
                       </button>
                     </div>
-                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                      {savedRows.map(c=>{
-                        const m=companyMeta[c.id]||defaultMeta();
-                        const ownLabel=c.ownership_class||c.ownership;
-                        const oc=ownerColor[ownLabel]||"#5a5a7a";
-                        const qc=qualityColor[m.quality];
-                        return (
-                          <div key={c.id} style={{border:"1px solid #1a1a2a",background:"#0d0d1a",borderRadius:5,overflow:"hidden"}}>
-                            <div style={{padding:"13px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,borderBottom:"1px solid #131320"}}>
-                              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",minWidth:0}}>
-                                <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#e8e4d9"}}>{c.name}</span>
-                                {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
-                                {c.hq&&<span style={{fontSize:10,color:"#3a3a5a"}}>{c.hq}</span>}
-                                {c.foundedYear&&<span style={{fontSize:10,color:"#2a2a4a"}}>Est. {c.foundedYear}</span>}
-                                {c.employees&&<span style={{fontSize:10,color:"#2a2a4a"}}>{c.employees} emp</span>}
-                                {c.revenue&&<span style={{fontSize:10,color:"#2a2a4a"}}>{c.revenue}</span>}
-                              </div>
-                              <button className="save-btn saved" style={{flexShrink:0}} onClick={()=>saveCompany(c.id,false)}>Remove</button>
+                  </div>
+                  <div className="flex flex-col gap-4">
+                    {savedRows.map((c) => {
+                      const m = companyMeta[c.id] || defaultMeta();
+                      const ownLabel = c.ownership_class || c.ownership;
+                      const ownCls = ownerBadgeClasses(ownLabel);
+                      const qCls = QUALITY_SELECT_CLASS[m.quality] || "";
+                      const contactOpen = !!savedContactExpanded[c.id];
+                      return (
+                        <div
+                          key={c.id}
+                          className="overflow-hidden rounded-lg border border-border bg-card shadow-sm transition-colors hover:bg-muted/20"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-4">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <span className="text-ui font-semibold text-foreground">{c.name}</span>
+                              {ownLabel && (
+                                <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
+                              )}
+                              {c.hq && <span className="text-data text-muted-foreground">{c.hq}</span>}
+                              {c.foundedYear && <span className="text-data text-muted-foreground">Est. {c.foundedYear}</span>}
+                              {c.employees && <span className="text-data text-muted-foreground">{c.employees} emp</span>}
+                              {c.revenue && <span className="text-data text-muted-foreground">{c.revenue}</span>}
                             </div>
-                            <div style={{padding:"12px 16px",display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 2fr",gap:10,alignItems:"start"}}>
-                              {[["Website","website","https://…"],["Contact Name","contactName","Full name"],["Role","role","Title"],["Email","email","email@co.com"]].map(([lbl,field,ph])=>(
-                                <div key={field}>
-                                  <div style={{fontSize:9,color:"#2a2a4a",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>{lbl}</div>
-                                  <input className="meta-in" placeholder={ph} value={m[field]} onChange={e=>updateMeta(c.id,field,e.target.value)} onClick={ev=>ev.stopPropagation()}/>
+                            <div className="flex shrink-0 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleSavedContact(c.id)}
+                                className="rounded-md border border-border px-3 py-1.5 text-data font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                              >
+                                {contactOpen ? "Hide contact" : "Contact & CRM"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => saveCompany(c.id, false)}
+                                className="rounded-md border border-destructive/40 px-3 py-1.5 text-data font-medium text-destructive hover:bg-destructive/10"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                          {contactOpen && (
+                            <div className="space-y-4 p-4">
+                              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                {[
+                                  ["Website", "website", "https://…"],
+                                  ["Contact name", "contactName", "Full name"],
+                                  ["Role", "role", "Title"],
+                                  ["Email", "email", "email@co.com"],
+                                ].map(([lbl, field, ph]) => (
+                                  <div key={field}>
+                                    <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                      {lbl}
+                                    </label>
+                                    <input
+                                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+                                      placeholder={ph}
+                                      value={m[field]}
+                                      onChange={(e) => updateMeta(c.id, field, e.target.value)}
+                                    />
+                                  </div>
+                                ))}
+                                <div>
+                                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                    Quality
+                                  </label>
+                                  <select
+                                    className={`w-full rounded-md border bg-background px-3 py-2 text-data outline-none focus:ring-2 focus:ring-primary/25 ${qCls}`}
+                                    value={m.quality}
+                                    onChange={(e) => updateMeta(c.id, "quality", e.target.value)}
+                                  >
+                                    {QUALITY_TIERS.map((t) => (
+                                      <option key={t} value={t}>
+                                        {t}
+                                      </option>
+                                    ))}
+                                  </select>
                                 </div>
-                              ))}
-                              <div>
-                                <div style={{fontSize:9,color:"#2a2a4a",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>Quality</div>
-                                <select className="meta-sel" value={m.quality} onChange={e=>updateMeta(c.id,"quality",e.target.value)} onClick={ev=>ev.stopPropagation()}
-                                  style={{color:qc||"#c8c4b8",borderColor:qc?`${qc}60`:"#131320",background:qc?`${qc}12`:"#0a0a12"}}>
-                                  {QUALITY_TIERS.map(t=><option key={t} value={t}>{t}</option>)}
-                                </select>
-                              </div>
-                              <div>
-                                <div style={{fontSize:9,color:"#2a2a4a",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4}}>Comments</div>
-                                <input className="meta-in" placeholder="Notes, next steps, flags…" value={m.comments} onChange={e=>updateMeta(c.id,"comments",e.target.value)} onClick={ev=>ev.stopPropagation()}/>
+                                <div className="md:col-span-2">
+                                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                    Comments
+                                  </label>
+                                  <input
+                                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+                                    placeholder="Notes, next steps…"
+                                    value={m.comments}
+                                    onChange={(e) => updateMeta(c.id, "comments", e.target.value)}
+                                  />
+                                </div>
                               </div>
                             </div>
-                            <div style={{padding:"0 16px 12px",display:"flex",gap:5,flexWrap:"wrap"}}>
-                              {(c.verticals||[]).map(v=><span key={v} style={{fontSize:10,color:"#f0844a",background:"rgba(240,132,74,.06)",padding:"2px 7px",borderRadius:2,border:"1px solid rgba(240,132,74,.15)"}}>{v}</span>)}
-                              {(c.products||[]).map(p=><span key={p} style={{fontSize:10,color:"#3a3a5a",background:"#0a0a12",padding:"2px 7px",borderRadius:2,border:"1px solid #131320"}}>{p}</span>)}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {activeTab==="universe"&&(
-              <div className="fi">
-                <div style={{fontSize:12,color:"#3a3a5a",marginBottom:12}}>
-                  All companies persisted in <code style={{color:"#5a5a7a"}}>universe.db</code> ({universeTotal} total, showing {universeRows.length}).
-                </div>
-                <button className="clr" style={{width:"auto",marginBottom:12}} onClick={loadUniverseRows}>Refresh</button>
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  {universeRows.map((c)=>{
-                    const ownLabel=c.ownership_class||c.ownership;
-                    const oc=ownerColor[ownLabel]||"#5a5a7a";
-                    return (
-                      <div key={c.id} className="card" style={{cursor:"default"}}>
-                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                            <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,color:"#e8e4d9"}}>{c.name}</span>
-                            {ownLabel&&<span style={{fontSize:10,background:`${oc}12`,border:`1px solid ${oc}30`,color:oc,padding:"2px 7px",borderRadius:2}}>{ownLabel}</span>}
-                            {c.is_saved&&<span style={{fontSize:10,color:"#c4f04a"}}>saved</span>}
-                            <span style={{fontSize:10,color:"#3a3a5a"}}>{c.domain}</span>
-                          </div>
-                          <div style={{display:"flex",gap:6}}>
-                            <a className="save-btn" href={c.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>↗ site</a>
-                            <button className="save-btn" onClick={()=>saveCompany(c.id,!c.is_saved)}>{c.is_saved?"Unsave":"Save"}</button>
+                          )}
+                          <div className="flex flex-wrap gap-1.5 border-t border-border p-4 pt-3">
+                            {(c.verticals || []).map((v) => (
+                              <span key={v} className={`${pillBase} border-amber-500/30 bg-amber-500/5 text-amber-900 dark:text-amber-100`}>
+                                {v}
+                              </span>
+                            ))}
+                            {(c.products || []).map((p) => (
+                              <span key={p} className={`${pillBase} border-border bg-muted/50 text-muted-foreground`}>
+                                {p}
+                              </span>
+                            ))}
                           </div>
                         </div>
-                        <div style={{fontSize:11,color:"#4a4a6a",marginTop:6}}>Score {(c.score ?? c.thesisScore) || "—"} · {(c.sourceTags||[]).join(" · ")}</div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {activeTab === "universe" && (
+            <div className="animate-in-fade space-y-4">
+              <p className="text-data text-muted-foreground">
+                All companies in <code>universe.db</code> ({universeTotal} total, showing {universeRows.length}).
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={loadUniverseRows}
+                  className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
+                >
+                  Refresh
+                </button>
+                {universeRows.length < universeTotal && (
+                  <button
+                    type="button"
+                    onClick={loadMoreUniverse}
+                    className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
+                  >
+                    Load more
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-col gap-3">
+                {universeRows.map((c) => {
+                  const ownLabel = c.ownership_class || c.ownership;
+                  const ownCls = ownerBadgeClasses(ownLabel);
+                  return (
+                    <div
+                      key={c.id}
+                      className="rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/25"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="font-semibold text-foreground">{c.name}</span>
+                          {ownLabel && (
+                            <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
+                          )}
+                          {c.is_saved && <span className="text-data font-medium text-primary">saved</span>}
+                          <span className="truncate text-data text-muted-foreground">{c.domain}</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <a
+                            className="rounded-md border border-border px-3 py-1.5 text-data text-primary hover:bg-muted"
+                            href={c.website}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            Site
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() => saveCompany(c.id, !c.is_saved)}
+                            className="rounded-md border border-border px-3 py-1.5 text-data font-medium hover:bg-muted"
+                          >
+                            {c.is_saved ? "Unsave" : "Save"}
+                          </button>
+                        </div>
                       </div>
+                      <p className="mt-2 text-data text-muted-foreground">
+                        Score {(c.score ?? c.thesisScore) || "—"} · {(c.sourceTags || []).join(" · ")}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <FilterDrawer open={filterDrawerOpen} onClose={() => setFilterDrawerOpen(false)}>
+        <div className="mb-4 flex gap-0 border-b border-border">
+          {[
+            ["vertical", "Vertical"],
+            ["product", "Product"],
+            ["company", "Company"],
+            ["tags", "Tags"],
+          ].map(([id, lbl]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSidebarSection(id)}
+              className={`flex-1 border-b-2 py-2.5 text-data font-semibold uppercase tracking-wide transition-colors ${
+                sidebarSection === id
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+
+        {sidebarSection === "vertical" && (
+          <div className="space-y-3 animate-in-fade">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Industry verticals</p>
+            <div className="flex flex-col gap-2">
+              {VERTICALS.map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => toggleVertical(v)}
+                  className={`flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-data transition-colors ${
+                    selectedVerticals.includes(v)
+                      ? "border-primary/50 bg-primary/10 text-foreground"
+                      : "border-border text-muted-foreground hover:border-muted-foreground/40"
+                  }`}
+                >
+                  <span style={{ opacity: selectedVerticals.includes(v) ? 1 : 0 }} className="w-3 shrink-0">
+                    ✓
+                  </span>
+                  {v}
+                </button>
+              ))}
+            </div>
+            {selectedVerticals.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedVerticals([])}
+                className="w-full rounded-md border border-border py-2 text-data text-muted-foreground hover:bg-muted"
+              >
+                Clear ({selectedVerticals.length})
+              </button>
+            )}
+          </div>
+        )}
+
+        {sidebarSection === "product" && (
+          <div className="space-y-3 animate-in-fade">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedProducts(Object.keys(SOFTWARE_PRODUCTS))}
+                className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedProducts([DEFAULT_PRODUCT_KEY]);
+                  setSelectedTagsByProduct({});
+                }}
+                className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
+              >
+                Clear
+              </button>
+            </div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Software type</p>
+            <div className="flex flex-col border-t border-border">
+              {Object.entries(SOFTWARE_PRODUCTS).map(([name, data]) => {
+                const on = selectedProducts.includes(name);
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    title={data.description}
+                    onClick={() => {
+                      setSelectedProducts((prev) => {
+                        if (prev.includes(name)) {
+                          const next = prev.filter((x) => x !== name);
+                          return next.length ? next : [DEFAULT_PRODUCT_KEY];
+                        }
+                        return [...prev, name];
+                      });
+                    }}
+                    className={`flex w-full items-center gap-2 border-l-2 py-2.5 ps-3 text-left text-data transition-colors ${
+                      on
+                        ? "border-primary bg-primary/5 text-foreground"
+                        : "border-transparent text-muted-foreground hover:border-muted-foreground/30 hover:text-foreground"
+                    }`}
+                  >
+                    <span className="w-3 shrink-0" style={{ opacity: on ? 1 : 0 }}>
+                      ✓
+                    </span>
+                    <span className="shrink-0">{data.icon}</span>
+                    <span className="leading-snug">{name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {sidebarSection === "company" && (
+          <div className="space-y-3 animate-in-fade">
+            <div className="space-y-2 rounded-lg border border-border p-3">
+              <button
+                type="button"
+                onClick={applyIdealProfile}
+                className="w-full rounded-md bg-primary px-3 py-2 text-ui font-semibold text-primary-foreground"
+              >
+                Apply ideal profile
+              </button>
+              <button
+                type="button"
+                onClick={resetIdealProfile}
+                className="w-full rounded-md border border-border py-2 text-data font-medium text-muted-foreground hover:bg-muted"
+              >
+                Reset profile filters
+              </button>
+              <p className="text-data leading-relaxed text-muted-foreground">
+                Founded before 2017, 15–100 employees, $2–10M revenue, proprietary. Unknown revenue/employees are kept.
+              </p>
+            </div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Company attributes</p>
+            <label className="block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Company type</label>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+              value={companyTypeFilter}
+              onChange={(e) => setCompanyTypeFilter(e.target.value)}
+            >
+              {COMPANY_TYPES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Ownership</label>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+              value={ownershipFilter}
+              onChange={(e) => setOwnershipFilter(e.target.value)}
+            >
+              {OWNERSHIP_TYPES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Revenue</label>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+              value={revenueFilter}
+              onChange={(e) => setRevenueFilter(e.target.value)}
+            >
+              {REVENUE_RANGES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Employees</label>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+              value={sizeFilter}
+              onChange={(e) => setSizeFilter(e.target.value)}
+            >
+              {EMPLOYEE_RANGES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Year founded</label>
+            <select
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+              value={foundedFilter}
+              onChange={(e) => setFoundedFilter(e.target.value)}
+            >
+              {FOUNDED_RANGES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <p className="mt-4 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">PE thesis filters</p>
+            <label className="flex items-center gap-2 text-data text-muted-foreground">
+              <input type="checkbox" checked={thesisRequireMissionCritical} onChange={(e) => setThesisRequireMissionCritical(e.target.checked)} />
+              Mission-critical
+            </label>
+            <label className="flex items-center gap-2 text-data text-muted-foreground">
+              <input type="checkbox" checked={thesisRequireVertIntegrated} onChange={(e) => setThesisRequireVertIntegrated(e.target.checked)} />
+              Vertically integrated
+            </label>
+            <label className="flex items-center gap-2 text-data text-muted-foreground">
+              <input type="checkbox" checked={thesisRequireProprietary} onChange={(e) => setThesisRequireProprietary(e.target.checked)} />
+              Proprietary stack
+            </label>
+            <label className="flex items-center gap-2 text-data text-muted-foreground">
+              <input type="checkbox" checked={thesisRequireFounderVintage} onChange={(e) => setThesisRequireFounderVintage(e.target.checked)} />
+              Founder-op or vintage PE
+            </label>
+            <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Min ownership confidence
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={minOwnershipConfidence}
+              onChange={(e) => setMinOwnershipConfidence(Number(e.target.value))}
+              className="w-full"
+            />
+            <p className="text-data text-muted-foreground">{minOwnershipConfidence.toFixed(2)}</p>
+            {activeFilterCount > 0 && (
+              <button
+                type="button"
+                onClick={clearAll}
+                className="mt-3 w-full rounded-md border border-destructive/40 py-2 text-data font-medium text-destructive hover:bg-destructive/10"
+              >
+                Clear all filters
+              </button>
+            )}
+          </div>
+        )}
+
+        {sidebarSection === "tags" && (
+          <div className="space-y-4 animate-in-fade">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              {selectedProducts.length} product categor{selectedProducts.length === 1 ? "y" : "ies"} selected
+            </p>
+            {selectedProducts.length > 1 && (
+              <div className="space-y-2">
+                <p className="text-data text-muted-foreground">Pick a category to edit capability tags</p>
+                <div className="flex flex-wrap gap-2">
+                  {selectedProducts.map((productName) => {
+                    const pdata = SOFTWARE_PRODUCTS[productName];
+                    if (!pdata) return null;
+                    const active = capabilityFocusProduct === productName;
+                    return (
+                      <button
+                        key={productName}
+                        type="button"
+                        onClick={() => setDiscoverCapabilityProduct(productName)}
+                        className={`rounded-md border px-2.5 py-1.5 text-left text-data transition-colors ${
+                          active
+                            ? "border-primary/50 bg-primary/10 text-foreground"
+                            : "border-border text-muted-foreground hover:bg-muted/50"
+                        }`}
+                      >
+                        <span className="me-1">{pdata.icon}</span>
+                        {productName}
+                      </button>
                     );
                   })}
                 </div>
               </div>
             )}
-
+            {(() => {
+              const productName = capabilityFocusProduct;
+              const pdata = SOFTWARE_PRODUCTS[productName];
+              if (!pdata) return null;
+              return (
+                <div className="space-y-3 border-t border-border pt-3">
+                  <div>
+                    <span className="me-2">{pdata.icon}</span>
+                    <span className="text-ui font-semibold text-foreground">{productName}</span>
+                    <p className="mt-1 text-data leading-relaxed text-muted-foreground">{pdata.description}</p>
+                  </div>
+                  {Object.entries(pdata.filters).map(([group, tags]) => (
+                    <div key={productName + group} className="space-y-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{group}</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {tags.map((tag) => {
+                          const active = ((selectedTagsByProduct[productName] || {})[group] || []).includes(tag);
+                          return (
+                            <button
+                              key={tag}
+                              type="button"
+                              onClick={() => toggleTag(productName, group, tag)}
+                              className={`rounded-md border px-2.5 py-1 text-data transition-colors ${
+                                active
+                                  ? "border-primary/50 bg-primary/10 text-primary"
+                                  : "border-border text-muted-foreground hover:border-muted-foreground/50"
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+            {selectedVerticals.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Verticals</span>
+                {selectedVerticals.map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => toggleVertical(v)}
+                    className={`${pillBase} border-amber-500/40 bg-amber-500/5 text-amber-900 dark:text-amber-100`}
+                  >
+                    ✕ {v}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      </div>
+        )}
+      </FilterDrawer>
 
-      {settingsOpen && (
-        <div className="modal-bg" onClick={() => setSettingsOpen(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15,marginBottom:10}}>Settings</div>
-            <div style={{fontSize:11,color:"#6a6a8a",marginBottom:12}}>API keys live in server <code>.env</code> (never in the browser). Badges show what the server detected.</div>
-            <span className="fl" style={{marginTop:0}}>LLM classifier (optional)</span>
-            <select className="sel" value={llmProvider} onChange={(e) => setLlmProvider(e.target.value)}>
-              {["none","openai","anthropic","gemini","ollama"].map((p) => (
-                <option key={p} value={p}>{p}</option>
-              ))}
-            </select>
-            <div style={{marginTop:14,fontSize:10,color:"#3a3a5a",lineHeight:1.6}}>
-              <div>Brave: {apiStatus.brave ? "on" : "off"}</div>
-              <div>Exa: {apiStatus.exa ? "on" : "off"}</div>
-              <div>Apollo: {apiStatus.apollo ? "on" : "off"}</div>
-              <div>Crunchbase: {apiStatus.crunchbase ? "on" : "off"}</div>
-              <div>OpenAI: {apiStatus.openai ? "on" : "off"}</div>
-              <div>Anthropic: {apiStatus.anthropic ? "on" : "off"}</div>
-              <div>Gemini: {apiStatus.gemini ? "on" : "off"}</div>
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        <p className="mb-4 text-data leading-relaxed text-muted-foreground">
+          API keys stay in server <code>.env</code>. Status reflects what the server detected.
+        </p>
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Run options</p>
+        <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Target volume</label>
+        <input
+          type="number"
+          min={50}
+          max={5000}
+          step={50}
+          value={maxCompanies}
+          onChange={(e) => setMaxCompanies(Math.min(5000, Math.max(50, parseInt(e.target.value, 10) || 500)))}
+          className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+        />
+        <label className="mt-3 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Discovery breadth</label>
+        <select
+          className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+          value={breadth}
+          onChange={(e) => setBreadth(e.target.value)}
+        >
+          <option value="focused">Focused</option>
+          <option value="broad">Broad</option>
+          <option value="exhaustive">Exhaustive</option>
+        </select>
+        <p className="mt-6 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">LLM classifier (optional)</p>
+        <select
+          className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
+          value={llmProvider}
+          onChange={(e) => setLlmProvider(e.target.value)}
+        >
+          {["none", "openai", "anthropic", "gemini", "ollama"].map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+        <div className="mt-4 space-y-1 rounded-md border border-border bg-muted/30 p-3 font-mono text-data text-muted-foreground">
+          <div>Brave: {apiStatus.brave ? "on" : "off"}</div>
+          <div>Exa: {apiStatus.exa ? "on" : "off"}</div>
+          <div>Apollo: {apiStatus.apollo ? "on" : "off"}</div>
+          <div>Crunchbase: {apiStatus.crunchbase ? "on" : "off"}</div>
+          <div>OpenAI: {apiStatus.openai ? "on" : "off"}</div>
+          <div>Anthropic: {apiStatus.anthropic ? "on" : "off"}</div>
+          <div>Gemini: {apiStatus.gemini ? "on" : "off"}</div>
+        </div>
+      </SettingsDrawer>
+
+      {recModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 p-4 backdrop-blur-[1px] dark:bg-background/60"
+          onClick={() => setRecModalOpen(false)}
+          role="presentation">
+          <div
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-labelledby="rec-modal-title">
+            <h2 id="rec-modal-title" className="text-ui font-semibold text-foreground">
+              Similar companies
+            </h2>
+            {!recPreview || !recPreview.ok ? (
+              <p className="mt-3 text-data text-muted-foreground">{recPreview?.message || "No suggestion data."}</p>
+            ) : (
+              <div className="mt-3 space-y-4 text-data">
+                <p className="text-muted-foreground">
+                  Source: {recPreview.source === "llm" ? `LLM (${llmProvider})` : "Heuristic fallback"}
+                </p>
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Suggested verticals</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {(recPreview.selectedVerticals || []).map((v) => (
+                      <span
+                        key={v}
+                        className="inline-flex rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1 text-data text-amber-900 dark:text-amber-100">
+                        {v}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                {(recPreview.matchedProductHints || []).length > 0 && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Product hints</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {recPreview.matchedProductHints.map((p) => (
+                        <span
+                          key={p}
+                          className="inline-flex rounded-md border border-primary/40 bg-primary/5 px-2 py-1 text-data text-primary">
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Extra Brave queries</div>
+                  <ul className="mt-2 max-h-40 list-inside list-disc space-y-1 overflow-y-auto text-muted-foreground">
+                    {(recPreview.additionalSearchQueries || []).map((q, i) => (
+                      <li key={`${i}-${q.slice(0, 48)}`}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+                {(recPreview.recommendationExaQueries || []).length > 0 && apiStatus?.exa && (
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Exa neural</div>
+                    <ul className="mt-2 list-inside list-disc space-y-1 text-muted-foreground">
+                      {(recPreview.recommendationExaQueries || []).map((q, i) => (
+                        <li key={`${i}-${q.slice(0, 48)}`}>{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <p className="text-muted-foreground">
+                  Apply updates your filters and attaches these queries to your{" "}
+                  <span className="font-semibold text-foreground">next</span> search only, then clears them.
+                </p>
+              </div>
+            )}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRecModalOpen(false)}
+                className="rounded-md border border-border px-4 py-2 text-data font-medium text-muted-foreground hover:bg-muted">
+                Close
+              </button>
+              {recPreview?.ok ? (
+                <button
+                  type="button"
+                  onClick={applyRecommendationPreview}
+                  className="rounded-md bg-primary px-4 py-2 text-ui font-semibold text-primary-foreground hover:opacity-95">
+                  Apply & go to Discover
+                </button>
+              ) : null}
             </div>
-            <button className="search-btn" style={{marginTop:16,width:"100%",justifyContent:"center"}} type="button" onClick={() => setSettingsOpen(false)}>Close</button>
           </div>
         </div>
       )}
-    </div>
+
+      <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} items={commandItems} />
+    </DashboardShell>
   );
 }

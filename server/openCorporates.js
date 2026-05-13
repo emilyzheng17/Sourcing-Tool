@@ -19,6 +19,7 @@ export async function openCorporatesSearch(companyName) {
       incorporationDate: c.incorporation_date || null,
       companyNumber: c.company_number,
       ocUrl: c.opencorporates_url,
+      registeredAddress: c.registered_address_in_full || c.registered_address || null,
     };
   } catch {
     return null;

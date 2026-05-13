@@ -1,10 +1,24 @@
 import { normalizeDomain, isLikelyCompanyDomain } from "../lib/domains.js";
 import { buildSearchQueries } from "../queryTemplates.js";
+import { breadthMultiplier } from "../lib/breadth.js";
 
 export async function searchBrave(brief, env) {
   const key = env.BRAVE_API_KEY;
   if (!key) return [];
-  const queries = buildSearchQueries(brief).slice(0, 20);
+  const m = breadthMultiplier(brief);
+  const maxQueries = Math.min(56, 28 * m);
+  const maxResults = Math.min(500, 180 * m);
+  const baseQueries = buildSearchQueries(brief);
+  const extras = Array.isArray(brief.additionalSearchQueries)
+    ? brief.additionalSearchQueries.map(String).filter(Boolean)
+    : [];
+  const seenQ = new Set();
+  const queries = [...baseQueries, ...extras].filter((q) => {
+    const k = q.toLowerCase();
+    if (seenQ.has(k)) return false;
+    seenQ.add(k);
+    return true;
+  }).slice(0, maxQueries);
   const all = [];
   for (const q of queries) {
     try {
@@ -34,7 +48,7 @@ export async function searchBrave(brief, env) {
       /* ignore */
     }
   }
-  return dedupeDomain(all).slice(0, 120);
+  return dedupeDomain(all).slice(0, maxResults);
 }
 
 function dedupeDomain(arr) {

@@ -1,78 +1,88 @@
 import { getClassifier } from "./providers/index.js";
 import { enrichCandidate } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
-import { fanOutSources } from "./sources/index.js";
-import { normalizeDomain, mergeSourceTags, isLikelyCompanyDomain } from "./lib/domains.js";
+import { normalizeDomain } from "./lib/domains.js";
+import { discoverMergedCandidates } from "./lib/candidateDiscovery.js";
 import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from "./db.js";
+import { breadthMultiplier } from "./lib/breadth.js";
 import pLimit from "p-limit";
 
-function primaryKey(c) {
-  const d = normalizeDomain(c.website);
-  if (!d) return "";
-  if (d.includes("g2.com") || d.includes("capterra.com") || d.includes("getapp.com")) {
-    const slug = (c.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80);
-    return `listing:${slug}`;
-  }
-  return d;
+const JOB_MS_MIN = 10 * 60 * 1000;
+const JOB_MS_MAX = 90 * 60 * 1000;
+
+function clampedMaxCompanies(brief) {
+  return Math.min(5000, Math.max(50, parseInt(String(brief.maxCompanies ?? 500), 10) || 500));
 }
 
-function mergeCandidates(buckets) {
-  const map = new Map();
-  for (const arr of Object.values(buckets)) {
-    for (const c of arr || []) {
-      if (!c?.website) continue;
-      const key = primaryKey(c);
-      if (!key) continue;
-      const existing = map.get(key);
-      if (!existing) {
-        map.set(key, { ...c, sourceTags: [c.sourceTag].filter(Boolean) });
-      } else {
-        existing.sourceTags = mergeSourceTags(existing.sourceTags, [c.sourceTag]);
-        if (!existing.name && c.name) existing.name = c.name;
-        existing.rawMetadata = { ...existing.rawMetadata, ...c.rawMetadata };
-      }
-    }
-  }
-  return [...map.values()];
+/**
+ * Scale wall-clock budget with candidate count & breadth — large runs need longer to enrich.
+ */
+function jobDeadlineMs(brief) {
+  const n = clampedMaxCompanies(brief);
+  const m = breadthMultiplier(brief);
+  const breadthFactor = m === 4 ? 1.35 : m === 2 ? 1.15 : 1;
+  const added = Math.floor(n / 50) * 45 * 1000;
+  const raw = JOB_MS_MIN + added * breadthFactor;
+  return Math.min(JOB_MS_MAX, raw);
+}
+
+function applyPaidHints(candidate) {
+  const md = candidate.rawMetadata || {};
+  const foundedYear =
+    candidate.foundedYear ??
+    (md.apolloFoundedYear != null ? parseInt(String(md.apolloFoundedYear), 10) : null);
+  return {
+    ...candidate,
+    employees: candidate.employees ?? md.apolloEmployees ?? md.crunchbaseEmployees ?? null,
+    hq: candidate.hq ?? md.hq ?? null,
+    foundedYear: Number.isFinite(foundedYear) ? foundedYear : candidate.foundedYear ?? null,
+    revenue: candidate.revenue ?? null,
+  };
 }
 
 export async function runSearchPipeline(brief, env, emit) {
   const exclude = new Set((brief.excludeDomains || []).map((x) => normalizeDomain(x)).filter(Boolean));
 
-  emit({ type: "log", message: "Fan-out: PE portfolios, associations, G2, Capterra, Brave, Exa…" });
-  const buckets = await fanOutSources(brief, env);
-  const counts = Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v?.length || 0]));
-  emit({ type: "log", message: `Sources raw: ${JSON.stringify(counts)}` });
+  const m = breadthMultiplier(brief);
+  const concurrency = m === 4 ? 14 : m === 2 ? 10 : 6;
 
-  let merged = mergeCandidates(buckets);
-  merged = merged.filter((c) => {
-    const d = normalizeDomain(c.website);
-    if (!d) return false;
-    if (exclude.has(d)) return false;
-    if (d.includes("g2.com") || d.includes("capterra.com") || d.includes("getapp.com")) return true;
-    return isLikelyCompanyDomain(d);
+  const fetchCache = new Map();
+  const jitterHostState = new Map();
+  const fetchOpts = { cache: fetchCache, jitterHostState };
+
+  const deadline = Date.now() + jobDeadlineMs(brief);
+  let timedOut = false;
+
+  const { merged, timedOut: mergeTimedOut } = await discoverMergedCandidates(brief, env, fetchOpts, emit, {
+    deadline,
+    exclude,
   });
+  timedOut = timedOut || mergeTimedOut;
 
-  emit({ type: "log", message: `Merged unique domains: ${merged.length}` });
+  const classifier = getClassifier(brief.settings?.llmProvider || "none", env, emit);
+  const enrichLimit = pLimit(concurrency);
 
-  const limitRun = Math.min(merged.length, brief.maxCompanies ?? 200);
-  merged = merged.slice(0, limitRun);
+  const total = merged.length;
 
-  const classifier = getClassifier(brief.settings?.llmProvider || "none", env);
-  const enrichLimit = pLimit(6);
-
-  let idx = 0;
+  let completed = 0;
   await Promise.all(
     merged.map((c) =>
       enrichLimit(async () => {
-        idx += 1;
-        emit({ type: "log", message: `Enrich ${idx}/${merged.length}: ${c.name}` });
+        if (Date.now() > deadline) {
+          timedOut = true;
+          return;
+        }
+
+        const seeded = applyPaidHints(c);
         let enriched;
         try {
-          enriched = await enrichCandidate(c, brief, env);
+          enriched = await enrichCandidate(seeded, brief, env, fetchOpts);
         } catch (e) {
           emit({ type: "log", message: `Skip ${c.name}: ${e.message}` });
-          return;
+        } finally {
+          completed += 1;
+          emit({ type: "log", message: `Enrich ${completed}/${total}: ${c.name}` });
+          emit({ type: "progress", processed: completed, total });
         }
         if (!enriched) return;
 
@@ -140,5 +150,5 @@ export async function runSearchPipeline(brief, env, emit) {
     )
   );
 
-  emit({ type: "done", total: merged.length });
+  emit({ type: "done", total, processed: completed, timedOut: !!timedOut });
 }

@@ -6,7 +6,7 @@ export function buildSearchQueries(brief) {
   const { activeProduct, selectedVerticals = [], selectedTags = [], ownershipFilter } = brief;
   const vert = selectedVerticals.length ? selectedVerticals : ["industrial B2B"];
   const productSlug = activeProduct.replace(/&/g, "and").toLowerCase();
-  const tags = selectedTags.slice(0, 5).join(" ");
+  const tags = (Array.isArray(selectedTags) ? selectedTags : []).slice(0, 5).join(" ");
   const queries = [];
 
   for (const v of vert) {
@@ -18,9 +18,15 @@ export function buildSearchQueries(brief) {
     queries.push(`"${v}" "private equity" software acquisition`);
     queries.push(`"${v}" bootstrapped software company`);
     queries.push(`"${v}" founder led enterprise software`);
+    queries.push(`${v} ${productSlug} B2B SaaS vendors`);
+    queries.push(`industrial ${v} ${productSlug} platform`);
+    queries.push(`${productSlug} software for ${v} industry`);
   }
 
-  if (tags) queries.push(`${activeProduct} ${tags} industrial`);
+  if (tags) {
+    queries.push(`${activeProduct} ${tags} industrial`);
+    queries.push(`${productSlug} ${tags} enterprise`);
+  }
 
   if (ownershipFilter === "Founder-Owned" || ownershipFilter === "Founder-Operated") {
     queries.push(`founder owned ${productSlug} software`);
@@ -34,6 +40,7 @@ export function buildSearchQueries(brief) {
   queries.push(`site:crunchbase.com ${productSlug}`);
   queries.push(`site:softwareequity.com ${productSlug}`);
   queries.push(`industrial ${productSlug} "system of record"`);
+  queries.push(`${productSlug} mission critical operations software`);
 
   // Dedupe while preserving order
   const seen = new Set();

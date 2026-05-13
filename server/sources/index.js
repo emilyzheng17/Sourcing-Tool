@@ -1,7 +1,9 @@
 import { searchPePortfolios } from "./peFirms.js";
+import { searchRollupPages } from "./rollupPages.js";
 import { searchTradeAssocs } from "./tradeAssocs.js";
 import { searchG2 } from "./g2.js";
 import { searchCapterra } from "./capterra.js";
+import { searchGetApp } from "./getApp.js";
 import { searchBrave } from "./brave.js";
 import { searchExa } from "./exa.js";
 import { searchApollo } from "./apollo.js";
@@ -11,26 +13,32 @@ import { searchCrunchbase } from "./crunchbase.js";
  * Run all source adapters in parallel.
  * @param {object} brief
  * @param {NodeJS.ProcessEnv} env
+ * @param {{ cache?: Map, jitterHostState?: Map }} [fetchOpts]
  */
-export async function fanOutSources(brief, env) {
+export async function fanOutSources(brief, env, fetchOpts) {
+  const fo = fetchOpts || {};
   const [
     pe,
+    rollup,
     assoc,
     g2,
     capterra,
+    getapp,
     brave,
     exa,
     apollo,
     crunchbase,
   ] = await Promise.all([
-    searchPePortfolios(),
-    searchTradeAssocs(brief),
-    searchG2(brief),
-    searchCapterra(brief),
+    searchPePortfolios(brief, fo),
+    searchRollupPages(brief, fo),
+    searchTradeAssocs(brief, fo),
+    searchG2(brief, fo),
+    searchCapterra(brief, fo),
+    searchGetApp(brief, fo),
     searchBrave(brief, env),
     searchExa(brief, env),
     searchApollo(brief, env),
     searchCrunchbase(brief, env),
   ]);
-  return { pe, assoc, g2, capterra, brave, exa, apollo, crunchbase };
+  return { pe, rollup, assoc, g2, capterra, getapp, brave, exa, apollo, crunchbase };
 }

@@ -8,14 +8,16 @@ Deterministic, backend-driven sourcing for B2B industrial software vendors, tune
 
 ## What it does
 
-1. **Discovers** companies from structured sources (PE portfolio pages, trade-association vendor lists, G2/Capterra category pages, Brave Search, Exa neural search, optional Apollo/Crunchbase).
+1. **Discovers** companies from structured sources — **vertical-first**, then **product-specific** narrowing (same sources: PE portfolios, trade-association vendor lists, G2/Capterra, Brave, Exa, optional Apollo/Crunchbase).
+
 2. **Enriches** each candidate (homepage scrape, OpenCorporates registry, targeted Brave acquisition queries).
 3. **Scores** against a configurable PE thesis using deterministic rules (no LLM required).
 4. **Optionally classifies** mission-critical / vertically-integrated / proprietary via a pluggable LLM (OpenAI, Anthropic, Gemini, or local Ollama). **Default: off.**
 5. **Persists** every result in SQLite (`universe.db`) and supports manual analyst triage.
 6. **Exports** an enriched Excel sheet.
+7. **Recommendations** — `POST /api/recommendations/from-saved` analyzes up to 60 saved companies and returns suggested verticals, product hints, and extra Brave/Exa-style queries (LLM when a provider is configured in Settings, otherwise heuristic). The UI applies them to the next search only.
 
-The pipeline streams results to the UI over Server-Sent Events as each company is scored.
+The pipeline streams results to the UI over Server-Sent Events as each company is scored. Large **target volume** settings run longer: the server extends the job time budget (up to 90 minutes) so more rows can finish enriching.
 
 ---
 
@@ -30,8 +32,8 @@ React UI (Vite, :5173)  ──/api──>  Express API (:3001)
                                        │     ├── G2 / Capterra category pages
                                        │     ├── Brave Search API (optional)
                                        │     ├── Exa.ai (optional)
-                                       │     ├── Apollo (optional stub)
-                                       │     └── Crunchbase (optional stub)
+                                       │     ├── Apollo (optional)
+                                       │     └── Crunchbase (optional)
                                        │
                                        ├── Dedupe by domain
                                        ├── Enrich (homepage + OpenCorporates + acquisition mining)
@@ -73,7 +75,7 @@ Sourcing-Tool/
 │   └─ CompanySourcingTool.jsx UI: sidebar filters, SSE search, cards, triage, export
 │
 └─ server/                     Backend (Express + SQLite)
-    ├─ index.js                Routes: /api/search, /api/universe, /api/companies/:id/*
+    ├─ index.js                Routes: /api/search, /api/universe, /api/recommendations/from-saved, /api/companies/:id/*
     ├─ pipeline.js             Orchestrates fan-out → enrich → score → persist → stream
     ├─ db.js                   better-sqlite3 wrapper for universe.db
     ├─ enrich.js               Resolves listing-page URLs → vendor sites, scrapes pages
@@ -90,8 +92,8 @@ Sourcing-Tool/
     │   ├─ capterra.js         Capterra category listing
     │   ├─ brave.js            Brave Search API
     │   ├─ exa.js              Exa.ai neural search
-    │   ├─ apollo.js           Apollo organization search (stub)
-    │   └─ crunchbase.js       Crunchbase organization search (stub)
+    │   ├─ apollo.js           Apollo organization search (optional API key)
+    │   └─ crunchbase.js       Crunchbase organization search (optional API key)
     │
     ├─ providers/              LLM classifier plugins
     │   ├─ index.js            Provider selector
@@ -103,7 +105,8 @@ Sourcing-Tool/
     │
     └─ lib/
         ├─ domains.js          normalizeDomain + filtering
-        └─ fetchText.js        Generic timed HTTP fetch
+        ├─ breadth.js          Discovery breadth multiplier for source caps
+        └─ fetchText.js        Timed HTTP fetch + optional per-job cache + host jitter
 ```
 
 Runtime-generated files (gitignored): `universe.db`, `dist/`, `node_modules/`.
@@ -116,13 +119,17 @@ Runtime-generated files (gitignored): `universe.db`, `dist/`, `node_modules/`.
 | --- | --- | --- |
 | `GET`  | `/api/health` | Health check |
 | `GET`  | `/api/settings-status` | Which env keys the server detected |
-| `POST` | `/api/search` | Kick off a job; returns `{ jobId }` |
-| `GET`  | `/api/search/:jobId/stream` | SSE: `{type:"log"|"company"|"done"|"error", ...}` |
-| `GET`  | `/api/universe?savedOnly=1&limit=200&offset=0` | List persisted companies |
+| `POST` | `/api/search` | Kick off a job; body may include `maxCompanies` (50–2000, default 500), `breadth` (`focused` / `broad` / `exhaustive`), `selectedProducts` (array of category names — fan-out per product then merge), `selectedTagsByProduct`, plus `selectedVerticals`, `ownershipFilter`, `thesis`, `settings`, … Returns `{ jobId }`. |
+| `GET`  | `/api/search/:jobId/stream` | SSE: `log`, `progress` (`{processed,total}`), `company`, `done` (`{total,processed,timedOut?}`), `error` |
+| `GET`  | `/api/universe?savedOnly=1&limit=2000&offset=0` | List persisted companies (`limit` capped at 2000) |
 | `POST` | `/api/companies/:id/save` | `{saved:boolean}` toggle |
 | `POST` | `/api/companies/:id/classify` | `{manualMissionCritical?:"yes"|"no"|"maybe"|"unset", ...}` |
 
----
+### Search request highlights
+
+- **Multi-product**: `selectedProducts` sweeps several software categories in one job; each company row may include `matchedProducts`.
+- **Breadth** scales internal source limits (Brave queries, PE firms scraped, G2/Capterra caps, Exa result count, etc.).
+- **Scoring**: rule-based `thesisScore` adds `ageScore`, `employeeScore`, and `revenueScore` when data allows.
 
 ## Environment variables
 

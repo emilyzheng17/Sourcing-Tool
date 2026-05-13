@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { fetchText } from "../lib/fetchText.js";
 import { normalizeDomain, isLikelyCompanyDomain } from "../lib/domains.js";
+import { breadthMultiplier } from "../lib/breadth.js";
 
 /**
  * Map vertical → public pages that often list vendors/partners (best-effort).
@@ -10,6 +11,7 @@ const VERTICAL_URLS = {
   "Metals & Mining": [
     "https://www.nssga.org/",
     "https://www.nma.org/",
+    "https://www.gold.org/"
   ],
   "Bulk Materials": ["https://www.nssga.org/"],
   "Bulk Liquids": ["https://www.api.org/"],
@@ -52,7 +54,11 @@ function extractLinks(html, baseUrl, vertical) {
   return out;
 }
 
-export async function searchTradeAssocs(brief) {
+/**
+ * @param {object} brief
+ * @param {{ cache?: Map, jitterHostState?: Map }} [fetchOpts]
+ */
+export async function searchTradeAssocs(brief, fetchOpts = {}) {
   const verticals = brief.selectedVerticals?.length ? brief.selectedVerticals : Object.keys(VERTICAL_URLS);
   const all = [];
   for (const v of verticals) {
@@ -60,7 +66,11 @@ export async function searchTradeAssocs(brief) {
     if (!urls) continue;
     for (const url of urls) {
       try {
-        const { ok, text } = await fetchText(url, { timeout: 20000 });
+        const { ok, text } = await fetchText(url, {
+          timeout: 20000,
+          cache: fetchOpts.cache,
+          jitterHostState: fetchOpts.jitterHostState,
+        });
         if (!ok || !text) continue;
         all.push(...extractLinks(text, url, v));
       } catch {
@@ -68,5 +78,7 @@ export async function searchTradeAssocs(brief) {
       }
     }
   }
-  return all.slice(0, 80);
+  const m = breadthMultiplier(brief);
+  const cap = Math.min(200, 80 * m);
+  return all.slice(0, cap);
 }
