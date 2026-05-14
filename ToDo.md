@@ -20,8 +20,9 @@ TO DO:
 7. Are the searches already in the universe excluded?
 8. Identify what is taking the longest to run by maybe running analytics.
 9. Find a way to use less search api tokens. But still getting more search out of them.
-
-
+10. Add each company that is found and parsed during the search directly to the universe so if the search fails later it doesnt forget them.
+11. Make sure each company isnt duplicated in the search. Check the website links for that maybe.
+12. Go through the codebase, remove stale code, find fundamental ways to parse information faster.
 
 ## Architecture analysis
 
@@ -95,3 +96,6 @@ Maybe add analytics
 Maybe, add a reclassify button that goes through each company and fixes all of the info and filters for each one.
 Maybe, add an enrich button to each company that keeps track of all related sources for that company so information and go in further depth later.
 Would it be relevant to make tools for each filter like a seperate tool for estimating employee count for a company.
+
+Add the country in the showing of each company
+Clean un each slab of info for the companeis

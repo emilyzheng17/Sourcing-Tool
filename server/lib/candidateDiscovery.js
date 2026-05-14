@@ -42,28 +42,31 @@ export function mergeCandidates(buckets) {
   return [...map.values()];
 }
 
+/** @param {Map<string, object>} map */
+export function mergeFlatInto(map, c) {
+  if (!c?.website) return;
+  const key = primaryKey(c);
+  if (!key) return;
+  const incomingTags = Array.isArray(c.sourceTags) ? c.sourceTags : [c.sourceTag].filter(Boolean);
+  const incomingMp = Array.isArray(c.matchedProducts) ? c.matchedProducts : [];
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, {
+      ...c,
+      sourceTags: [...incomingTags],
+      matchedProducts: [...new Set(incomingMp)],
+    });
+  } else {
+    existing.sourceTags = mergeSourceTags(existing.sourceTags, incomingTags);
+    existing.matchedProducts = [...new Set([...(existing.matchedProducts || []), ...incomingMp])];
+    if (!existing.name && c.name) existing.name = c.name;
+    existing.rawMetadata = { ...existing.rawMetadata, ...c.rawMetadata };
+  }
+}
+
 export function mergeFlatCandidates(list) {
   const map = new Map();
-  for (const c of list) {
-    if (!c?.website) continue;
-    const key = primaryKey(c);
-    if (!key) continue;
-    const incomingTags = Array.isArray(c.sourceTags) ? c.sourceTags : [c.sourceTag].filter(Boolean);
-    const incomingMp = Array.isArray(c.matchedProducts) ? c.matchedProducts : [];
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, {
-        ...c,
-        sourceTags: [...incomingTags],
-        matchedProducts: [...new Set(incomingMp)],
-      });
-    } else {
-      existing.sourceTags = mergeSourceTags(existing.sourceTags, incomingTags);
-      existing.matchedProducts = [...new Set([...(existing.matchedProducts || []), ...incomingMp])];
-      if (!existing.name && c.name) existing.name = c.name;
-      existing.rawMetadata = { ...existing.rawMetadata, ...c.rawMetadata };
-    }
-  }
+  for (const c of list) mergeFlatInto(map, c);
   return [...map.values()];
 }
 
@@ -112,7 +115,8 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
     brief.selectedVerticals?.length > 0 ? brief.selectedVerticals : [null];
 
   let timedOut = false;
-  const flatTagged = [];
+  /** Dedupe while fanning out so multi-vertical × multi-product runs do not retain huge duplicate arrays. */
+  const deduped = new Map();
   /** @type {Record<string, number>} */
   const bucketTotals = {};
   for (const vctx of verticalContexts) {
@@ -151,7 +155,7 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
           ? { ...c, matchedProducts: [...new Set([...(c.matchedProducts || []), product])] }
           : c,
       );
-      flatTagged.push(...mergedPart);
+      for (const c of mergedPart) mergeFlatInto(deduped, c);
     }
   }
 
@@ -160,7 +164,7 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
     message: `Sources raw aggregated (all passes, pre-dedupe): ${JSON.stringify(bucketTotals)}`,
   });
 
-  let merged = mergeFlatCandidates(flatTagged);
+  let merged = [...deduped.values()];
   merged = merged.filter((c) => {
     const d = normalizeDomain(c.website);
     if (!d) return false;

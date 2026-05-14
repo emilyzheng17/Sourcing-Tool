@@ -3,7 +3,7 @@
  * Uses same jitter/cache contract as fetchText when opts.retry is unset.
  */
 
-import { fetchText } from "./fetchText.js";
+import { fetchText, putFetchCache } from "./fetchText.js";
 
 const UA = "SourcingTool/1.0 (+https://github.com/)";
 
@@ -85,7 +85,7 @@ export async function fetchHtml(url, opts = {}) {
       !r.ok && RETRYABLE_STATUSES.has(r.status) && attempt < maxAttempts && !blocked;
 
     if (r.ok && !blocked) {
-      if (cache) cache.set(url, { ok: r.ok, status: r.status, text: r.text, url: r.url, headers: r.headers });
+      if (cache) putFetchCache(cache, url, { ok: r.ok, status: r.status, text: r.text, url: r.url, headers: r.headers });
       return { ...r, fromCache: false, blockedHint: false };
     }
 
@@ -96,7 +96,8 @@ export async function fetchHtml(url, opts = {}) {
     }
 
     if (!retriable) {
-      if (cache && r.ok && !blocked) cache.set(url, { ok: r.ok, status: r.status, text: r.text, url: r.url, headers: r.headers });
+      if (cache && r.ok && !blocked)
+        putFetchCache(cache, url, { ok: r.ok, status: r.status, text: r.text, url: r.url, headers: r.headers });
       return { ...r, fromCache: false, blockedHint: blocked };
     }
 
@@ -106,7 +107,7 @@ export async function fetchHtml(url, opts = {}) {
   }
 
   if (last && cache && last.ok && !isLikelyBlockedOrChallengeHtml(last))
-    cache.set(url, { ok: last.ok, status: last.status, text: last.text, url: last.url, headers: last.headers });
+    putFetchCache(cache, url, { ok: last.ok, status: last.status, text: last.text, url: last.url, headers: last.headers });
   return last
     ? { ...last, fromCache: false, blockedHint: isLikelyBlockedOrChallengeHtml(last) }
     : { ok: false, status: 0, text: "", url, headers: {}, fromCache: false, blockedHint: false };

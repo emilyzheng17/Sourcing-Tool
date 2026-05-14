@@ -7,6 +7,7 @@ import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from 
 import { breadthMultiplier } from "./lib/breadth.js";
 import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
 import { normalizeToIso2 } from "../shared/geoCountry.js";
+import { resetFetchCacheAccounting } from "./lib/fetchText.js";
 import pLimit from "p-limit";
 
 const JOB_MS_MIN = 10 * 60 * 1000;
@@ -60,6 +61,10 @@ export async function runSearchPipeline(brief, env, emit) {
     exclude,
   });
   timedOut = timedOut || mergeTimedOut;
+
+  // Listing pages dominate cache size; enrichment refetches company URLs as needed.
+  fetchCache.clear();
+  resetFetchCacheAccounting(fetchCache);
 
   const classifier = getClassifier(brief.settings?.llmProvider || "none", env, emit);
   const enrichLimit = pLimit(concurrency);
