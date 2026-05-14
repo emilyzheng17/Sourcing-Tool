@@ -144,7 +144,7 @@ export default function CompanySourcingTool() {
   const [revenueFilter, setRevenueFilter] = useState("Any Revenue");
   const [sizeFilter, setSizeFilter] = useState("Any Size");
   const [foundedFilter, setFoundedFilter] = useState("Any Era");
-  const [maxCompanies, setMaxCompanies] = useState(500);
+  const [maxCompanies, setMaxCompanies] = useState(2000);
   const [breadth, setBreadth] = useState("focused");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchProgress, setSearchProgress] = useState(null);
@@ -2220,7 +2220,7 @@ export default function CompanySourcingTool() {
           max={5000}
           step={50}
           value={maxCompanies}
-          onChange={(e) => setMaxCompanies(Math.min(5000, Math.max(50, parseInt(e.target.value, 10) || 500)))}
+          onChange={(e) => setMaxCompanies(Math.min(5000, Math.max(50, parseInt(e.target.value, 10) || 2000)))}
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
         />
         <label className="mt-3 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Discovery breadth</label>

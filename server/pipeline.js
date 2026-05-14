@@ -13,7 +13,7 @@ const JOB_MS_MIN = 10 * 60 * 1000;
 const JOB_MS_MAX = 90 * 60 * 1000;
 
 function clampedMaxCompanies(brief) {
-  return Math.min(5000, Math.max(50, parseInt(String(brief.maxCompanies ?? 500), 10) || 500));
+  return Math.min(5000, Math.max(50, parseInt(String(brief.maxCompanies ?? 2000), 10) || 1000));
 }
 
 /**

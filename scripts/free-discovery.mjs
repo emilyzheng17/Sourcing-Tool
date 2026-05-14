@@ -36,7 +36,7 @@ function parseArgs(argv) {
   const o = {
     product: "ERP & Operations",
     breadth: "focused",
-    maxCompanies: 500,
+    maxCompanies: 2000,
     out: path.join(root, "out", "discovery"),
     queue: path.join(root, "free-discovery-queue.sqlite"),
     resume: false,
@@ -82,7 +82,7 @@ async function main() {
 Options:
   --product "ERP & Operations"   Active G2/Capterra/GetApp category product name
   --breadth focused|broad|exhaustive
-  --max 500                      maxCompanies (50–2000)
+  --max 1000                     maxCompanies (50–2000)
   --out ./out/discovery          NDJSON + CSV output directory
   --queue ./free-discovery-queue.sqlite   SQLite resume keys (primaryKey)
   --resume                       skip candidate_key rows already in queue DB

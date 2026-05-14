@@ -98,7 +98,7 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
   const exclude = options.exclude ?? new Set((brief.excludeDomains || []).map((x) => normalizeDomain(x)).filter(Boolean));
   const deadline = options.deadline ?? Number.POSITIVE_INFINITY;
 
-  const maxCompanies = Math.min(MAX_MERGE_CAP, Math.max(50, parseInt(String(brief.maxCompanies ?? 500), 10) || 500));
+  const maxCompanies = Math.min(MAX_MERGE_CAP, Math.max(50, parseInt(String(brief.maxCompanies ?? 1000), 10) || 1000));
 
   const products =
     brief.selectedProducts?.length > 0
