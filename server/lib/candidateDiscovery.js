@@ -2,7 +2,7 @@
  * Merge + filter logic shared by HTTP pipeline + CLI runners.
  */
 
-import { fanOutSources } from "../sources/index.js";
+import { fanOutSourcesIncremental } from "../sources/index.js";
 import { normalizeDomain, mergeSourceTags, isLikelyCompanyDomain } from "./domains.js";
 
 const MAX_MERGE_CAP = 5000;
@@ -70,6 +70,25 @@ export function mergeFlatCandidates(list) {
   return [...map.values()];
 }
 
+/**
+ * Post-merge eligibility (same rules as historical discoverMergedCandidates filter + slice cap).
+ * @param {object} c
+ * @param {Set<string>} exclude
+ */
+export function passesPostMergeFilters(c, exclude) {
+  const d = normalizeDomain(c.website);
+  if (!d) return false;
+  if (exclude.has(d)) return false;
+  if (
+    d.includes("g2.com") ||
+    d.includes("capterra.com") ||
+    d.includes("getapp.com") ||
+    d.includes("trustradius.com")
+  )
+    return true;
+  return isLikelyCompanyDomain(d);
+}
+
 function tagsForProduct(brief, product) {
   if (product == null) {
     if (Array.isArray(brief.selectedTags)) return brief.selectedTags;
@@ -94,9 +113,17 @@ function tagsForProduct(brief, product) {
  * @param {{ cache?: Map, jitterHostState?: Map }} [fetchOpts]
  * @param {(e: object) => void} [emit]
  * @param {{ deadline?: number, exclude?: Set<string> }} [options]
- * @returns {Promise<{ merged: object[], timedOut: boolean }>}
+ * @param {(key: string, getLatest: () => object | undefined) => void} [onEligibleCandidate]
+ * @returns {Promise<{ merged: object[], timedOut: boolean, deduped: Map<string, object> }>}
  */
-export async function discoverMergedCandidates(brief, env, fetchOpts, emit, options = {}) {
+export async function discoverMergedCandidatesStreaming(
+  brief,
+  env,
+  fetchOpts,
+  emit,
+  options,
+  onEligibleCandidate = null,
+) {
   const emitFn = typeof emit === "function" ? emit : () => {};
   const exclude = options.exclude ?? new Set((brief.excludeDomains || []).map((x) => normalizeDomain(x)).filter(Boolean));
   const deadline = options.deadline ?? Number.POSITIVE_INFINITY;
@@ -110,15 +137,35 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
         ? [brief.activeProduct]
         : [null];
 
-  /** Single broad pass (no explicit vertical) uses [] → queryTemplates + tradeAssocs defaults */
-  const verticalContexts =
-    brief.selectedVerticals?.length > 0 ? brief.selectedVerticals : [null];
+  const verticalContexts = brief.selectedVerticals?.length > 0 ? brief.selectedVerticals : [null];
 
   let timedOut = false;
-  /** Dedupe while fanning out so multi-vertical × multi-product runs do not retain huge duplicate arrays. */
   const deduped = new Map();
   /** @type {Record<string, number>} */
   const bucketTotals = {};
+  const queuedKeys = new Set();
+
+  function tryEnqueueForKey(key) {
+    if (!onEligibleCandidate) return;
+    if (!key || queuedKeys.has(key)) return;
+    if (queuedKeys.size >= maxCompanies) return;
+    const latest = deduped.get(key);
+    if (!latest || !passesPostMergeFilters(latest, exclude)) return;
+    queuedKeys.add(key);
+    onEligibleCandidate(key, () => deduped.get(key));
+  }
+
+  function ingestCandidates(list, product) {
+    for (const c of list || []) {
+      const cc = product
+        ? { ...c, matchedProducts: [...new Set([...(c.matchedProducts || []), product])] }
+        : c;
+      mergeFlatInto(deduped, cc);
+      const k = primaryKey(cc);
+      tryEnqueueForKey(k);
+    }
+  }
+
   for (const vctx of verticalContexts) {
     if (Date.now() > deadline) {
       timedOut = true;
@@ -142,20 +189,23 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
         type: "log",
         message: `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
       });
-      const buckets = await fanOutSources(subBrief, env, fetchOpts);
-      const counts = Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, v?.length || 0]));
-      for (const [k, n] of Object.entries(counts)) bucketTotals[k] = (bucketTotals[k] ?? 0) + n;
+
+      /** @type {Record<string, number>} */
+      const passBucketTotals = {};
+      await fanOutSourcesIncremental(subBrief, env, fetchOpts, (sourceKey, arr) => {
+        const n = arr?.length || 0;
+        passBucketTotals[sourceKey] = n;
+        bucketTotals[sourceKey] = (bucketTotals[sourceKey] ?? 0) + n;
+        ingestCandidates(arr, product);
+        emitFn({
+          type: "log",
+          message: `Source ready [${verticalLabel}] (${product ?? "broad"}) ${sourceKey}: ${n}`,
+        });
+      });
       emitFn({
         type: "log",
-        message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(counts)}`,
+        message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(passBucketTotals)}`,
       });
-
-      const mergedPart = mergeCandidates(buckets).map((c) =>
-        product
-          ? { ...c, matchedProducts: [...new Set([...(c.matchedProducts || []), product])] }
-          : c,
-      );
-      for (const c of mergedPart) mergeFlatInto(deduped, c);
     }
   }
 
@@ -164,25 +214,25 @@ export async function discoverMergedCandidates(brief, env, fetchOpts, emit, opti
     message: `Sources raw aggregated (all passes, pre-dedupe): ${JSON.stringify(bucketTotals)}`,
   });
 
-  let merged = [...deduped.values()];
-  merged = merged.filter((c) => {
-    const d = normalizeDomain(c.website);
-    if (!d) return false;
-    if (exclude.has(d)) return false;
-    if (
-      d.includes("g2.com") ||
-      d.includes("capterra.com") ||
-      d.includes("getapp.com") ||
-      d.includes("trustradius.com")
-    )
-      return true;
-    return isLikelyCompanyDomain(d);
-  });
+  let merged = [...deduped.values()].filter((c) => passesPostMergeFilters(c, exclude));
 
   emitFn({ type: "log", message: `Merged unique domains: ${merged.length}` });
 
   const limitRun = Math.min(merged.length, maxCompanies);
   merged = merged.slice(0, limitRun);
 
+  return { merged, timedOut, deduped };
+}
+
+/**
+ * @param {object} brief
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ cache?: Map, jitterHostState?: Map }} [fetchOpts]
+ * @param {(e: object) => void} [emit]
+ * @param {{ deadline?: number, exclude?: Set<string> }} [options]
+ * @returns {Promise<{ merged: object[], timedOut: boolean }>}
+ */
+export async function discoverMergedCandidates(brief, env, fetchOpts, emit, options = {}) {
+  const { merged, timedOut } = await discoverMergedCandidatesStreaming(brief, env, fetchOpts, emit, options, null);
   return { merged, timedOut };
 }

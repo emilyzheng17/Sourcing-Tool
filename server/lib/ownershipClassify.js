@@ -3,6 +3,8 @@
  * @typedef {{ ownership_class: string, ownership_confidence: number }} OwnershipResult
  */
 
+import { hasPublicListingSignals } from "./publicCompanySignals.js";
+
 /** @param {object} enriched */
 function buildCorpus(enriched) {
   const md = enriched.rawMetadata || {};
@@ -41,14 +43,6 @@ export function likelyPeBacked(enriched, acquirer, corpus) {
   return false;
 }
 
-function hasPublicSignals(corpus) {
-  return (
-    /\b(nasdaq|nyse|otcqx|otcqb|publicly traded|public company|listed on (the )?(new york|nasdaq)|stock ticker|ticker symbol|common stock|ordinary shares)\b/.test(
-      corpus,
-    ) || /\b(ipo|initial public offering)\b/.test(corpus)
-  );
-}
-
 function hasEsopSignals(corpus) {
   return /\b(esop|employee stock ownership|employee-owned|employee owned)\b/.test(corpus);
 }
@@ -83,7 +77,7 @@ export function inferOwnershipClass(enriched) {
   const history = enriched.acquisitionHistory || [];
   const withYears = acquisitionsWithYears(history);
 
-  if (hasPublicSignals(corpus)) {
+  if (hasPublicListingSignals(corpus)) {
     return { ownership_class: "Publicly Traded", ownership_confidence: 0.52 };
   }
   if (hasEsopSignals(corpus)) {

@@ -2,13 +2,13 @@ import { getClassifier } from "./providers/index.js";
 import { enrichCandidate } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
 import { normalizeDomain } from "./lib/domains.js";
-import { discoverMergedCandidates } from "./lib/candidateDiscovery.js";
+import { discoverMergedCandidatesStreaming } from "./lib/candidateDiscovery.js";
 import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from "./db.js";
 import { breadthMultiplier } from "./lib/breadth.js";
 import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
 import { normalizeToIso2 } from "../shared/geoCountry.js";
 import { resetFetchCacheAccounting } from "./lib/fetchText.js";
-import pLimit from "p-limit";
+import PQueue from "p-queue";
 
 const JOB_MS_MIN = 10 * 60 * 1000;
 const JOB_MS_MAX = 90 * 60 * 1000;
@@ -56,29 +56,31 @@ export async function runSearchPipeline(brief, env, emit) {
   const deadline = Date.now() + jobDeadlineMs(brief);
   let timedOut = false;
 
-  const { merged, timedOut: mergeTimedOut } = await discoverMergedCandidates(brief, env, fetchOpts, emit, {
-    deadline,
-    exclude,
-  });
-  timedOut = timedOut || mergeTimedOut;
-
-  // Listing pages dominate cache size; enrichment refetches company URLs as needed.
-  fetchCache.clear();
-  resetFetchCacheAccounting(fetchCache);
-
   const classifier = getClassifier(brief.settings?.llmProvider || "none", env, emit);
-  const enrichLimit = pLimit(concurrency);
-
-  const total = merged.length;
+  const queue = new PQueue({ concurrency });
 
   let completed = 0;
-  await Promise.all(
-    merged.map((c) =>
-      enrichLimit(async () => {
+  const progress = { scheduled: 0 };
+
+  const { timedOut: mergeTimedOut } = await discoverMergedCandidatesStreaming(
+    brief,
+    env,
+    fetchOpts,
+    emit,
+    {
+      deadline,
+      exclude,
+    },
+    (_key, getLatest) => {
+      progress.scheduled += 1;
+      queue.add(async () => {
         if (Date.now() > deadline) {
           timedOut = true;
           return;
         }
+
+        const c = getLatest();
+        if (!c) return;
 
         const seeded = applyPaidHints(c);
         let enriched;
@@ -88,8 +90,8 @@ export async function runSearchPipeline(brief, env, emit) {
           emit({ type: "log", message: `Skip ${c.name}: ${e.message}` });
         } finally {
           completed += 1;
-          emit({ type: "log", message: `Enrich ${completed}/${total}: ${c.name}` });
-          emit({ type: "progress", processed: completed, total });
+          emit({ type: "log", message: `Enrich ${completed}/${progress.scheduled}: ${c.name}` });
+          emit({ type: "progress", processed: completed, total: progress.scheduled });
         }
         if (!enriched) return;
 
@@ -203,9 +205,17 @@ export async function runSearchPipeline(brief, env, emit) {
 
         const row = getCompanyById(id);
         emit({ type: "company", company: rowToCompany(row) });
-      })
-    )
+      });
+    },
   );
 
-  emit({ type: "done", total, processed: completed, timedOut: !!timedOut });
+  timedOut = timedOut || mergeTimedOut;
+
+  // Listing pages dominate cache size; enrichment refetches company URLs as needed.
+  fetchCache.clear();
+  resetFetchCacheAccounting(fetchCache);
+
+  await queue.onIdle();
+
+  emit({ type: "done", total: progress.scheduled, processed: completed, timedOut: !!timedOut });
 }

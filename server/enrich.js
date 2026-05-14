@@ -7,6 +7,7 @@ import { tryFetchAtsSignals } from "./lib/atsPublic.js";
 import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePageText.js";
 import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
 import { evaluateProductFit } from "./lib/productFit.js";
+import { shouldFastFailEnrichment } from "./lib/publicCompanySignals.js";
 
 const MISSION_KW = [
   "system of record",
@@ -241,7 +242,40 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     origin = base;
   }
 
-  const pages = new Set([base, ...EXTRA_PATHS.map((p) => joinUrl(base, p))]);
+  let combinedText = "";
+  let title = resolved.name;
+  const allHeaders = {};
+  let fetchedPricingPath = false;
+  let rawHtmlForSocial = "";
+  let homepageFetched = false;
+
+  try {
+    const { ok, text, headers } = await fetchText(base, { timeout: 12000, ...fetchOpts });
+    if (ok && text) {
+      homepageFetched = true;
+      if (headers) Object.assign(allHeaders, headers);
+      const $ = cheerio.load(text);
+      const t = $("title").first().text().trim();
+      if (t) title = t.split("|")[0].trim();
+      const body = visibleTextFromHtml(text).slice(0, 12000);
+      const gateCorpus = sanitizeScrapedPlainText(body).toLowerCase();
+      if (shouldFastFailEnrichment(gateCorpus)) {
+        return null;
+      }
+      combinedText += "\n" + body;
+      rawHtmlForSocial = text;
+    }
+  } catch {
+    /* fall through to sitemap + extra paths */
+  }
+
+  const pages = new Set();
+  if (!homepageFetched) {
+    pages.add(base);
+  }
+  for (const p of EXTRA_PATHS) {
+    pages.add(joinUrl(base, p));
+  }
 
   try {
     const smUrl = joinUrl(base, "/sitemap.xml");
@@ -260,14 +294,9 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     /* ignore sitemap */
   }
 
-  let combinedText = "";
-  let title = resolved.name;
-  const allHeaders = {};
-  let fetchedPricingPath = false;
-  let rawHtmlForSocial = "";
-
   for (const p of [...pages]) {
     try {
+      if (homepageFetched && p.split("?")[0] === base.split("?")[0]) continue;
       const { ok, text, headers } = await fetchText(p, { timeout: 12000, ...fetchOpts });
       if (ok && text) {
         if (p.toLowerCase().includes("/pricing")) fetchedPricingPath = true;
