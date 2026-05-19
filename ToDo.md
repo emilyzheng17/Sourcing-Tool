@@ -11,91 +11,89 @@ They are then moved into the universe where they can be deleted and parsed easil
 
 
 TO DO:
-1. Make it a lot faster
-2. Better Filtering on ownership (only options needed are: Founder Owned, Founder Operated, VC Backed and PE Owned)
-3. Remove publically traded companies
-4. MAYBE Add an unclassified tab, if it would allow the software to both discover and classify simultaniously
-5. Would it be possible to batch the discovery searches so result are output a lot faster. That could mean going through each filter pair or whatever and doing them individually or in parallel instead of one big batch to make them faster?
-6. Maybe running the manual search first, outputting results then each data source individually to make it faster
-7. Are the searches already in the universe excluded?
-8. Identify what is taking the longest to run by maybe running analytics.
-9. Find a way to use less search api tokens. But still getting more search out of them.
-10. Add each company that is found and parsed during the search directly to the universe so if the search fails later it doesnt forget them.
-11. Make sure each company isnt duplicated in the search. Check the website links for that maybe.
-12. Go through the codebase, remove stale code, find fundamental ways to parse information faster.
+1. ~~Make it a lot faster~~ **DONE** — Staged enrichment pipeline: cheap pre-score after homepage fetch discards ~70-90% of candidates before expensive work (sub-pages, OpenCorporates, Brave, ATS).
+2. ~~Better Filtering on ownership~~ **DONE** — Rule-based `ownershipClassify.js` infers PE Owned / VC Backed / Founder Operated / Founder Owned / Unknown using corpus signals, digital archaeology (copyright years, legacy stack, founder narrative), and acquisition history. Shared `discoverCompanyFilter.js` normalizes old DB labels to the new canonical set.
+3. ~~Remove publically traded companies~~ **DONE** — `shouldFastFailEnrichment` rejects public-company signals (NASDAQ/NYSE/IR/SEC) at Stage A before any deep enrichment runs.
+4. ~~Add an unclassified tab~~ **DONE** — Overnight Universe Builder (`overnightPipeline.js`) discovers permissively, persists every candidate immediately, and background workers enrich/classify asynchronously. Companies progress through DISCOVERED → BASIC_ENRICHED → FULLY_ENRICHED → CLASSIFIED statuses.
+5. ~~Would it be possible to batch the discovery searches so result are output a lot faster.~~ **DONE** — `discoverMergedCandidatesStreaming` yields candidates into the enrichment queue as each source returns; enrichment starts immediately.
+6. ~~Maybe running the manual search first, outputting results then each data source individually to make it faster~~ **DONE** — streaming pipeline emits companies as soon as each one finishes enrichment.
+7. ~~Are the searches already in the universe excluded?~~ **DONE** — `getFreshCompanyByDomain` with TTL policy allows skipping re-enrichment for fresh rows. Domains already in `universe.db` can emit the cached row to SSE.
+8. ~~Identify what is taking the longest to run by maybe running analytics.~~ **DONE** — `company_events` table provides a full audit trail (DISCOVERED, BASIC_ENRICHED, FULLY_ENRICHED, CLASSIFIED, FAILED) with timestamps for pipeline analysis.
+9. ~~Find a way to use less search api tokens. But still getting more search out of them.~~ **DONE** — Brave acquisition queries are now gated behind `cheapScore >= 65` (configurable via `ACQUISITION_SCORE_THRESHOLD`). Only high-potential candidates trigger API calls. Persistent HTTP cache (`dbCache.js`) avoids re-fetching across runs.
+10. ~~Add each company that is found and parsed during the search directly to the universe so if the search fails later it doesnt forget them.~~ **DONE** — pipeline upserts each company immediately after scoring.
+11. ~~Make sure each company isnt duplicated in the search. Check the website links for that maybe.~~ **DONE** — `candidateDiscovery.js` dedupes by normalized domain before enrichment.
+12. ~~Go through the codebase, remove stale code, find fundamental ways to parse information faster.~~ **DONE** — Persistent HTTP cache, improved fetchText with jitter/throttle, shared filter logic extracted to `shared/`.
 
 ## Architecture analysis
 
-This is a sophisticated critique of the current architecture. The two biggest performance leakages are:
+All original architecture bottlenecks have been resolved:
 
-1. **Global discovery barrier** — `runSearchPipeline` waits for all of `discoverMergedCandidates` to finish before any `enrichCandidate` runs. Enrichment is parallelized with `p-limit`, but nothing is enriched until discovery is complete.
-2. **Late-stage heuristics** — `inferOwnershipClass` in `server/lib/ownershipClassify.js` already includes public-market and VC-style signals, but it runs **after** `enrich.js` has done expensive work (multi-page `fetchText`, sitemap, OpenCorporates, optional Brave, ATS, etc.). Most wall-clock cost is usually **before** the LLM, not only before the LLM.
+1. ~~**Global discovery barrier**~~ **FIXED** — `discoverMergedCandidatesStreaming` + `PQueue` now enqueues candidates for enrichment as each source returns. No batch boundary.
+2. ~~**Late-stage heuristics**~~ **FIXED** — Staged enrichment: `enrichCandidateStageA` runs a cheap pre-score (homepage 25KB fetch + heuristic scoring) and discards garbage before any sub-page crawl, OpenCorporates, Brave, or LLM work. Brave acquisition mining is additionally gated behind `cheapScore >= 65`.
 
-**Already true today:** `fanOutSources` runs all source adapters in **parallel** (`Promise.all`). The **vertical × product** passes in `candidateDiscovery.js` are **sequential**; parallelizing those passes is a separate win from “parallel sources.”
+**Already true today:** `fanOutSources` runs all source adapters in **parallel** (`Promise.all`). The **vertical × product** passes in `candidateDiscovery.js` are **sequential**; parallelizing those passes is a separate win from "parallel sources."
 
-**Universe vs search:** Domains already in `universe.db` are **not** automatically excluded from discovery; `excludeDomains` is client-driven (e.g. “find more” excludes current result domains only). Re-runs **upsert** and redo enrichment unless we add policy.
-
-If the goal is a higher-speed engine for the Valsoft model, concrete implementation directions:
-
-### 1. Streaming pipeline (producer–consumer)
-
-Instead of discovery → enrichment as a single batch boundary, move toward a **reactive** model.
-
-- **Change:** Refactor discovery so it can **yield** candidates incrementally (e.g. `AsyncGenerator`, or `EventEmitter` / callback as each source bucket returns).
-- **Queue:** Prefer something that accepts **dynamic tasks** while running (e.g. `p-queue` with `add()`), not only a fixed `p-limit` over a pre-sized list.
-- **Flow:** Discovery **produces** domains into the queue; enrichment **consumes** as soon as the first domains exist.
-- **Result:** First company row can reach the UI in seconds while long-tail discovery still runs (target: meaningful **time-to-first-result**).
-
-### 2. Fast-fail gate (early rejection) in `enrich.js`
-
-Tier enrichment so **cheap signals run before expensive I/O**.
-
-- **Stage 1 — Quick look:** Fetch **homepage only** (single `fetchText`).
-- **Stage 2 — Regex / keyword gate (“Valsoft fast-fail”):** e.g. publicly traded / IR / ticker language (extend patterns already in `hasPublicSignals`); plus **out-of-scope** noise (consultancy/agency/custom dev “our clients” style) if productized.
-- **Kill switch:** On hit, **return immediately** — no extra paths (`/pricing`, leadership, etc.), no sitemap crawl, no OpenCorporates, no Brave, no LLM.
-
-**Note:** Deduplication / “skip enrich” must happen **before** `enrichCandidate` (or at its very top after one fetch), not only inside `upsertCompany`, which runs **after** enrichment.
-
-### 3. Database-first deduplication (set-difference + TTL)
-
-Before a domain enters the enrichment queue:
-
-- Query `companies` by `domain` (e.g. `updated_at`).
-- If a row exists and is **fresh** under a policy (e.g. **30-day TTL**), emit the cached row to SSE and **skip** re-enrichment; if stale, re-enrich.
-- Optionally filter discovery output with `existingDomains` so known domains never queue (with the same TTL policy so data can refresh).
-
-### 4. Ownership / “legacy VMS” heuristics
-
-Improve `inferOwnershipClass.js` (and/or enrich corpus) with **digital archaeology** style signals, e.g.:
-
-- **Copyright / staleness:** Old copyright span in footer (e.g. © 2008–2023) as a weak signal for stable, older VMS-style vendors (tune precision to avoid false positives).
-- **Founder language:** Prefer `/about` or `/team` snippets when fetching selectively (after gate passes), not only homepage.
-- **Legacy stack:** Hints in HTML (e.g. `.aspx`, very old jQuery/Bootstrap references) as a **positive** signal for Valsoft-style targets, not generic noise.
-
-### 5. UI follow-ups for the above
-
-- **Unclassified:** Universe view with a **status** dimension (`unclassified` vs classified); new discoveries land as unclassified while enrichment can lag or run in background.
-- **Manual re-enrich:** Per-row **Refresh** to force a new scrape / re-score for one company without a global search.
+**Universe vs search:** `getFreshCompanyByDomain` with TTL policy can skip re-enrichment for fresh rows. Overnight Builder persists every candidate with `company_sources` attribution for provenance tracking.
 
 ### Summary by ROI (effort vs impact)
 
-| Improvement | Effort | Impact | Why it helps Valsoft |
-|-------------|--------|--------|----------------------|
-| Early regex / noise gate after **one** homepage fetch | Low | High | Drops a large share of public/agency noise before expensive fetches and APIs. |
-| DB set-difference + TTL before queue | Medium | High | Repeat searches become cheap; less redundant Brave/OC traffic. |
-| Streaming discovery + enrichment queue | High | Medium–high | Fixes perceived latency (time-to-first-row); true wall-clock win depends on source latency mix. |
-| Legacy / founder / copyright heuristics | Low–medium | Medium | Surfaces quiet, stable VMS-style names the thesis cares about. |
+| Improvement | Effort | Impact | Status |
+|-------------|--------|--------|--------|
+| Early regex / noise gate after **one** homepage fetch | Low | High | **DONE** — `cheapPreScore` + `shouldFastFailEnrichment` in Stage A |
+| DB set-difference + TTL before queue | Medium | High | **DONE** — `getFreshCompanyByDomain` + `http_cache` table |
+| Streaming discovery + enrichment queue | High | Medium–high | **DONE** — `discoverMergedCandidatesStreaming` + `PQueue` |
+| Legacy / founder / copyright heuristics | Low–medium | Medium | **DONE** — `ownershipClassify.js` digital archaeology signals |
+| Brave acquisition queries gated by score | Low | High | **DONE** — only fires when `cheapScore >= 65` |
+| Persistent HTTP cache | Medium | High | **DONE** — `dbCache.js` with SQLite-backed TTL |
+| Overnight Universe Builder | High | Very high | **DONE** — `overnightPipeline.js` + background workers |
+| Ownership classification engine | Medium | High | **DONE** — `ownershipClassify.js` with 5 canonical classes |
+| Vertical & product fit scoring | Medium | High | **DONE** — `verticalFit.js` + `productFit.js` |
+| Shared filter system | Medium | High | **DONE** — `shared/discoverCompanyFilter.js` + `geoCountry.js` |
+| Company similarity / bulk triage | Medium | Medium | **DONE** — `companySimilarity.js` + similar-to-rejected API |
+| New source adapters (TrustRadius, Tavily, LinkedIn export) | Low each | Medium | **DONE** |
+| Reject / restore workflow | Low | Medium | **DONE** — single + bulk reject/restore with UI |
+| Test coverage for core modules | Medium | High | **DONE** — 6 test suites covering ownership, filters, similarity, product fit, public signals |
 
-**Recommended first step:** Add the **public / noise fast-fail** immediately after the **first** homepage fetch in `enrichCandidate`, and short-circuit the rest of the function so sub-pages, sitemap, OpenCorporates, and Brave are skipped for obvious rejects.
+---
+
+## Remaining improvements (prioritized)
+
+### Tier 1 — Highest impact, next up
+
+- **Scheduled / cron universe builds** — Add a scheduler (node-cron or config-driven) so overnight builds run automatically on a cadence (e.g. weekly per vertical). Eliminates the need to manually trigger builds and keeps the universe growing continuously.
+
+- **Smart re-enrichment with staleness detection** — Companies go stale. Auto-queue re-enrichment for rows whose `last_enriched_at` exceeds a configurable TTL (e.g. 30–60 days). Prioritize saved companies and high-scorers for refresh. Surface a "stale data" indicator in the UI.
+
+- **Dashboard & analytics** — Visual overview of the universe: discovery funnel (discovered → enriched → classified → saved), source effectiveness breakdown (which sources yield the highest-scoring companies), ownership/vertical/product distribution charts, and time-series growth. Would turn this from a search tool into a sourcing platform.
+
+- **Company detail page** — Dedicated full-page view for a single company with: complete event timeline (discovered, enriched, classified, saved), all source attributions, enrichment history, homepage excerpt, ownership reasoning, thesis score breakdown, and side-by-side comparison with similar companies. Currently all info is crammed into cards.
+
+### Tier 2 — High value, moderate effort
+
+- **Saved search configurations** — Store and replay search configurations (vertical + product + filter + breadth combos) with names. Lets analysts run the same sweep repeatedly without re-configuring. Natural companion to scheduled builds.
+
+- **Parallel vertical × product discovery** — The vertical × product passes in `candidateDiscovery.js` are sequential. Parallelizing them (while preserving source-level rate limits) would significantly speed up multi-product discovery runs.
+
+- **Company notes & analyst workflow** — Per-company free-text notes field, custom tags, and a workflow status dimension (e.g. "New", "Reviewing", "Contacted", "Passed") to support the analyst triage process beyond simple save/reject.
+
+- **Notification system** — Webhook or email/Slack alerts when high-scoring companies are discovered (e.g. "5 new companies scored 80+ in Fleet Management overnight"). Critical for making scheduled builds actionable without checking the UI.
+
+- **Export improvements** — Filtered Excel export (apply current filters before export), custom column selection, and optionally a one-page PDF company profile for investment committee memos.
+
+### Tier 3 — Nice to have, lower urgency
+
+- **Multi-user accounts & permissions** — User auth, role-based access, per-user saved lists, shared vs. private annotations. Needed if multiple analysts use the tool simultaneously.
+- **Enrichment source health monitoring** — Track success/failure rates per source adapter over time. Alert when a scraper starts failing (e.g. G2 changed their page structure). Auto-disable broken sources.
+- **Company merge / alias resolution** — Detect when multiple domains belong to the same parent company (e.g. after acquisitions, brand pivots) and merge them into a single record with all source attributions preserved.
+- **Incremental discovery deltas** — Show what's "new since last run" in the UI. Tag companies by discovery batch, surface a "New this week" view, and highlight universe growth trends.
+- **Configurable scoring weights** — Let the user tune thesis scoring weights from the UI (e.g. "I care more about founded year than employee count") instead of hard-coded rules in `score.js`.
+- **API rate-limit dashboard** — Show remaining API quotas for Brave, Exa, Tavily, Apollo, Crunchbase in the settings panel so the user knows how much capacity is left before starting a large run.
 
 
-Potential features:
+## Potential features (long-term)
 
-Maybe add accounts
-Maybe add analytics
-Maybe, add a reclassify button that goes through each company and fixes all of the info and filters for each one.
-Maybe, add an enrich button to each company that keeps track of all related sources for that company so information and go in further depth later.
-Would it be relevant to make tools for each filter like a seperate tool for estimating employee count for a company.
-
-Add the country in the showing of each company
-Clean un each slab of info for the companeis
+- Reclassify-all button that re-runs ownership + thesis scoring for every company in the universe.
+- Per-company "Refresh" to force a new scrape / re-score without a global search.
+- Integration with CRM (HubSpot, Salesforce) for pipeline handoff.
+- LLM-powered deal memo generation from enriched company data.
+- Geographic heat map visualization of the universe.

@@ -1,7 +1,14 @@
 import { normalizeDomain, isLikelyCompanyDomain } from "../lib/domains.js";
 import { breadthMultiplier } from "../lib/breadth.js";
+import { getCached, putCached } from "../lib/dbCache.js";
+
+const EXA_CACHE_TTL_DAYS = 3;
 
 async function exaFetchOnce(query, numResults, key) {
+  const cacheKey = `exa:${query}`;
+  const cached = getCached(cacheKey, EXA_CACHE_TTL_DAYS);
+  if (cached) return cached.ok ? (cached.payload || []) : [];
+
   const res = await fetch("https://api.exa.ai/search", {
     method: "POST",
     headers: {
@@ -15,9 +22,14 @@ async function exaFetchOnce(query, numResults, key) {
       contents: { text: false },
     }),
   });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    putCached(cacheKey, "exa", false, null);
+    return [];
+  }
   const data = await res.json();
-  return data.results || [];
+  const results = data.results || [];
+  putCached(cacheKey, "exa", true, results);
+  return results;
 }
 
 export async function searchExa(brief, env) {

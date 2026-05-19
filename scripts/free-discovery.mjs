@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import pLimit from "p-limit";
 import { discoverMergedCandidates, primaryKey } from "../server/lib/candidateDiscovery.js";
-import { enrichCandidate } from "../server/enrich.js";
+import { enrichCandidateStageA, enrichCandidateStageB } from "../server/enrich.js";
 import { scoreThesis } from "../server/score.js";
 import { normalizeDomain } from "../server/lib/domains.js";
 import { closePlaywrightBrowser } from "../server/lib/playwrightRender.js";
@@ -18,6 +18,7 @@ import { closePlaywrightBrowser } from "../server/lib/playwrightRender.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
 
+// #region CLI helpers
 function applyPaidHints(candidate) {
   const md = candidate.rawMetadata || {};
   const foundedYear =
@@ -36,7 +37,7 @@ function parseArgs(argv) {
   const o = {
     product: "ERP & Operations",
     breadth: "focused",
-    maxCompanies: 2000,
+    maxCompanies: 1000,
     out: path.join(root, "out", "discovery"),
     queue: path.join(root, "free-discovery-queue.sqlite"),
     resume: false,
@@ -73,7 +74,9 @@ function csvEscape(v) {
 function rowToCsvLine(obj, cols) {
   return cols.map((c) => csvEscape(obj[c])).join(",");
 }
+// #endregion
 
+// #region main
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -182,7 +185,14 @@ Env: PLAYWRIGHT=1 enables headless fallback (install: npx playwright install chr
 
         let enriched;
         try {
-          enriched = await enrichCandidate(applyPaidHints(c), brief, env, fetchOpts);
+          const seeded = applyPaidHints(c);
+          const stageA = await enrichCandidateStageA(seeded, brief, env, fetchOpts);
+          if (!stageA) {
+            metrics.skipped += 1;
+            ins.run({ candidate_key: ck, domain: null, ts: Date.now() });
+            return;
+          }
+          enriched = await enrichCandidateStageB(seeded, stageA, brief, env, fetchOpts);
         } catch (e) {
           metrics.failed += 1;
           console.error(`[discovery] enrich error ${ck}: ${e?.message || e}`);
@@ -242,6 +252,7 @@ Env: PLAYWRIGHT=1 enables headless fallback (install: npx playwright install chr
   db.close();
   await closePlaywrightBrowser().catch(() => {});
 }
+// #endregion
 
 main().catch((e) => {
   console.error(e);

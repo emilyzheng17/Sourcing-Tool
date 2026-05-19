@@ -7,9 +7,11 @@ import { FilterDrawer } from "./components/FilterDrawer.jsx";
 import { DiscoverFilterPanel } from "./components/DiscoverFilterPanel.jsx";
 import { SettingsDrawer } from "./components/SettingsDrawer.jsx";
 import { CommandPalette } from "./components/CommandPalette.jsx";
+import { BackToTopButton } from "./components/BackToTopButton.jsx";
 import { DEFAULT_ALLOWED_COUNTRY_CODES } from "../shared/geoCountry.js";
 import { companyPassesDiscoverFilters } from "../shared/discoverCompanyFilter.js";
 
+// #region Config & constants
 const VERTICALS = [
   "Metals & Mining","Bulk Materials","Bulk Liquids","Forestry & Lumber",
   "Structure Design & Analysis","Contractor Solutions","Equipment & Parts",
@@ -38,16 +40,11 @@ const SOFTWARE_PRODUCT_KEYS = Object.keys(SOFTWARE_PRODUCTS);
 
 const OWNERSHIP_TYPES = [
   "Any Ownership",
-  "Founder-Operated",
-  "Vintage PE",
-  "Recent PE",
+  "Founder Owned",
+  "Founder Operated",
+  "VC Backed",
+  "PE Owned",
   "Unknown",
-  "VC-Backed",
-  "Private Equity",
-  "Acquired",
-  "Publicly Traded",
-  "Family-Owned",
-  "Employee-Owned (ESOP)",
 ];
 
 const REVENUE_RANGES = [
@@ -86,19 +83,26 @@ const QUALITY_TIERS = ["—","Bronze","Silver","Gold","Platinum"];
 const COMPANY_TYPES = ["Any Type", "Software", "Hardware", "Hybrid", "Unknown"];
 
 const OWNER_BADGE_CLASS = {
+  "Founder Owned": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Founder Operated": "border-orange-500/35 bg-orange-500/10 text-orange-950 dark:text-orange-100",
+  "VC Backed": "border-emerald-500/35 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100",
+  "PE Owned": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
+  Unknown: "border-border bg-muted text-muted-foreground",
+  // Legacy class names kept for existing DB rows
+  "Founder-Owned": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Founder-Operated": "border-orange-500/35 bg-orange-500/10 text-orange-950 dark:text-orange-100",
   "VC-Backed": "border-emerald-500/35 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100",
   "Private Equity": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
-  "Founder-Owned": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
-  "Founder-Operated": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
   "Vintage PE": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
-  "Recent PE": "border-indigo-500/35 bg-indigo-500/10 text-indigo-950 dark:text-indigo-100",
-  Unknown: "border-border bg-muted text-muted-foreground",
-  Acquired: "border-orange-500/35 bg-orange-500/10 text-orange-950 dark:text-orange-100",
-  "Family-Owned": "border-sky-500/35 bg-sky-500/10 text-sky-950 dark:text-sky-100",
-  "Employee-Owned (ESOP)": "border-rose-500/35 bg-rose-500/10 text-rose-950 dark:text-rose-100",
-  "Publicly Traded": "border-lime-500/35 bg-lime-500/10 text-lime-950 dark:text-lime-100",
+  "Recent PE": "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
+  Acquired: "border-violet-500/35 bg-violet-500/10 text-violet-950 dark:text-violet-100",
+  "Family-Owned": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Employee-Owned (ESOP)": "border-amber-500/35 bg-amber-500/10 text-amber-950 dark:text-amber-100",
+  "Publicly Traded": "border-border bg-muted text-muted-foreground",
 };
+// #endregion
 
+// #region UI helpers
 function ownerBadgeClasses(label) {
   return OWNER_BADGE_CLASS[label] || OWNER_BADGE_CLASS.Unknown;
 }
@@ -136,7 +140,49 @@ const pillBase =
 
 const defaultMeta = () => ({ website:"", contactName:"", role:"", email:"", quality:"—", comments:"" });
 
+function defaultUniverseCriteria() {
+  return {
+    ownershipFilter: "Any Ownership",
+    companyTypeFilter: "Any Type",
+    revenueFilter: "Any Revenue",
+    sizeFilter: "Any Size",
+    foundedFilter: "Any Era",
+    thesisRequireMissionCritical: false,
+    thesisRequireVertIntegrated: false,
+    thesisRequireProprietary: false,
+    thesisRequireFounderVintage: false,
+    minOwnershipConfidence: 0,
+    allowedCountryCodes: [...DEFAULT_ALLOWED_COUNTRY_CODES],
+    selectedVerticals: [],
+    selectedProducts: [],
+    selectedTags: [],
+  };
+}
+
+function countUniverseCriteriaFilters(c, strictVerticalFit) {
+  const thesisFilterCount =
+    (c.thesisRequireMissionCritical ? 1 : 0) +
+    (c.thesisRequireVertIntegrated ? 1 : 0) +
+    (c.thesisRequireProprietary ? 1 : 0) +
+    (c.thesisRequireFounderVintage ? 1 : 0) +
+    (c.minOwnershipConfidence > 0 ? 1 : 0);
+  return (
+    (c.selectedVerticals?.length || 0) +
+    (c.selectedProducts?.length || 0) +
+    (strictVerticalFit ? 1 : 0) +
+    (c.ownershipFilter !== "Any Ownership" ? 1 : 0) +
+    (c.companyTypeFilter !== "Any Type" ? 1 : 0) +
+    (c.revenueFilter !== "Any Revenue" ? 1 : 0) +
+    (c.sizeFilter !== "Any Size" ? 1 : 0) +
+    (c.foundedFilter !== "Any Era" ? 1 : 0) +
+    thesisFilterCount +
+    ((c.allowedCountryCodes?.length || 0) > 0 ? 1 : 0)
+  );
+}
+// #endregion
+
 export default function CompanySourcingTool() {
+  // #region State
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [selectedVerticals, setSelectedVerticals] = useState([]);
   const [ownershipFilter, setOwnershipFilter] = useState("Any Ownership");
@@ -144,7 +190,7 @@ export default function CompanySourcingTool() {
   const [revenueFilter, setRevenueFilter] = useState("Any Revenue");
   const [sizeFilter, setSizeFilter] = useState("Any Size");
   const [foundedFilter, setFoundedFilter] = useState("Any Era");
-  const [maxCompanies, setMaxCompanies] = useState(2000);
+  const [maxCompanies, setMaxCompanies] = useState(1000);
   const [breadth, setBreadth] = useState("focused");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchProgress, setSearchProgress] = useState(null);
@@ -207,11 +253,32 @@ export default function CompanySourcingTool() {
   const [universeThesisRequireFounderVintage, setUniverseThesisRequireFounderVintage] = useState(false);
   const [universeMinOwnershipConfidence, setUniverseMinOwnershipConfidence] = useState(0);
   const [universeAllowedCountryCodes, setUniverseAllowedCountryCodes] = useState(() => [...DEFAULT_ALLOWED_COUNTRY_CODES]);
+  const [universeAppliedCriteria, setUniverseAppliedCriteria] = useState(defaultUniverseCriteria);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [savedContactExpanded, setSavedContactExpanded] = useState({});
   const resultsFilterInputRef = useRef(null);
   const { theme, toggleTheme } = useTheme();
 
+  // Build Universe state
+  const [buildDepth, setBuildDepth] = useState("standard");
+  const [buildMaxCandidates, setBuildMaxCandidates] = useState(5000);
+  const [buildMaxRunHours, setBuildMaxRunHours] = useState(8);
+  const [buildStageBThreshold, setBuildStageBThreshold] = useState(40);
+  const [buildUseOllama, setBuildUseOllama] = useState(false);
+  const [buildBreadth, setBuildBreadth] = useState("exhaustive");
+  const [buildVerticals, setBuildVerticals] = useState([]);
+  const [buildProducts, setBuildProducts] = useState([]);
+  const [buildJobId, setBuildJobId] = useState(null);
+  const [buildStatus, setBuildStatus] = useState(null);
+  const [buildStats, setBuildStats] = useState({ discovered: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
+  const [buildLog, setBuildLog] = useState("");
+  const [buildStartedAt, setBuildStartedAt] = useState(null);
+  const [buildHistory, setBuildHistory] = useState([]);
+  const buildEventSourceRef = useRef(null);
+  const mainScrollRef = useRef(null);
+  // #endregion
+
+  // #region Derived criteria
   const activeProduct = selectedProducts[0] ?? null;
 
   const discoverCriteriaForPredicate = useMemo(
@@ -266,7 +333,6 @@ export default function CompanySourcingTool() {
       selectedVerticals: universeSelectedVerticals,
       selectedProducts: universeSelectedProducts,
       selectedTags: [],
-      strictVerticalFit,
     }),
     [
       universeOwnershipFilter,
@@ -282,10 +348,11 @@ export default function CompanySourcingTool() {
       universeAllowedCountryCodes,
       universeSelectedVerticals,
       universeSelectedProducts,
-      strictVerticalFit,
     ],
   );
+  // #endregion
 
+  // #region Effects & API loading
   useEffect(() => {
     localStorage.setItem("sourcingCompanyMeta", JSON.stringify(companyMeta));
   }, [companyMeta]);
@@ -350,8 +417,12 @@ export default function CompanySourcingTool() {
   }, []);
 
   const fetchUniverseFirstPage = useCallback(
-    async (signal) => {
-      const criteria = { ...universeCriteriaForPredicate, textQuery: "" };
+    async (signal, criteriaOverride) => {
+      const criteria = {
+        ...(criteriaOverride ?? universeAppliedCriteria),
+        strictVerticalFit,
+        textQuery: "",
+      };
       try {
         const r = await fetch("/api/universe/query", {
           method: "POST",
@@ -373,16 +444,23 @@ export default function CompanySourcingTool() {
         setUniverseTotal(0);
       }
     },
-    [universeCriteriaForPredicate],
+    [universeAppliedCriteria, strictVerticalFit],
   );
 
   const loadUniverseRows = useCallback(() => {
     fetchUniverseFirstPage();
   }, [fetchUniverseFirstPage]);
 
+  const applyUniverseFilters = useCallback(() => {
+    const next = { ...universeCriteriaForPredicate };
+    setUniverseAppliedCriteria(next);
+    fetchUniverseFirstPage(undefined, next);
+    setUniverseFilterDrawerOpen(false);
+  }, [universeCriteriaForPredicate, fetchUniverseFirstPage]);
+
   const loadMoreUniverse = useCallback(() => {
     const offset = universeRows.length;
-    const criteria = { ...universeCriteriaForPredicate, textQuery: "" };
+    const criteria = { ...universeAppliedCriteria, strictVerticalFit, textQuery: "" };
     fetch("/api/universe/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -396,7 +474,7 @@ export default function CompanySourcingTool() {
         setUniverseTotal(d.total ?? 0);
       })
       .catch(() => {});
-  }, [universeRows.length, universeCriteriaForPredicate]);
+  }, [universeRows.length, universeAppliedCriteria, strictVerticalFit]);
 
   const loadRejectedRows = useCallback(() => {
     fetch("/api/universe?rejectedOnly=1&limit=500&offset=0")
@@ -440,7 +518,9 @@ export default function CompanySourcingTool() {
     const ac = new AbortController();
     fetchUniverseFirstPage(ac.signal);
     return () => ac.abort();
-  }, [activeTab, fetchUniverseFirstPage]);
+    // Only refetch when entering the universe tab; Apply / Refresh trigger loads explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab === "deleted") loadRejectedRows();
@@ -456,7 +536,9 @@ export default function CompanySourcingTool() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  // #endregion
 
+  // #region Handlers
   const toggleSavedContact = (id) =>
     setSavedContactExpanded((p) => ({ ...p, [id]: !p[id] }));
 
@@ -467,7 +549,9 @@ export default function CompanySourcingTool() {
     setUniverseSelectedVerticals((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
 
   const updateMeta = (id,field,val) => setCompanyMeta(prev=>({...prev,[id]:{...(prev[id]||defaultMeta()),[field]:val}}));
+  // #endregion
 
+  // #region API — company mutations
   const saveCompany = async (id, saved) => {
     try {
       const r = await fetch(`/api/companies/${id}/save`, {
@@ -646,7 +730,9 @@ export default function CompanySourcingTool() {
       setRestoreSelectedLoading(false);
     }
   };
+  // #endregion
 
+  // #region Filters
   const thesisFilterCount =
     (thesisRequireMissionCritical ? 1 : 0) +
     (thesisRequireVertIntegrated ? 1 : 0) +
@@ -666,24 +752,15 @@ export default function CompanySourcingTool() {
     thesisFilterCount +
     (allowedCountryCodes.length > 0 ? 1 : 0);
 
-  const universeThesisFilterCount =
-    (universeThesisRequireMissionCritical ? 1 : 0) +
-    (universeThesisRequireVertIntegrated ? 1 : 0) +
-    (universeThesisRequireProprietary ? 1 : 0) +
-    (universeThesisRequireFounderVintage ? 1 : 0) +
-    (universeMinOwnershipConfidence > 0 ? 1 : 0);
+  const universeActiveFilterCount = countUniverseCriteriaFilters(
+    universeCriteriaForPredicate,
+    strictVerticalFit,
+  );
 
-  const universeActiveFilterCount =
-    universeSelectedVerticals.length +
-    universeSelectedProducts.length +
-    (strictVerticalFit ? 1 : 0) +
-    (universeOwnershipFilter !== "Any Ownership" ? 1 : 0) +
-    (universeCompanyTypeFilter !== "Any Type" ? 1 : 0) +
-    (universeRevenueFilter !== "Any Revenue" ? 1 : 0) +
-    (universeSizeFilter !== "Any Size" ? 1 : 0) +
-    (universeFoundedFilter !== "Any Era" ? 1 : 0) +
-    universeThesisFilterCount +
-    (universeAllowedCountryCodes.length > 0 ? 1 : 0);
+  const universeAppliedFilterCount = useMemo(
+    () => countUniverseCriteriaFilters(universeAppliedCriteria, strictVerticalFit),
+    [universeAppliedCriteria, strictVerticalFit],
+  );
 
   const clearAll = () => {
     setSelectedVerticals([]);
@@ -750,7 +827,9 @@ export default function CompanySourcingTool() {
     setUniverseThesisRequireMissionCritical(false);
     setUniverseMinOwnershipConfidence(0);
   };
+  // #endregion
 
+  // #region Search pipeline
   const runSearch = async (findMore = false) => {
     if (selectedProducts.length === 0) {
       setSearchError("Select at least one software category under Filters → Product before searching.");
@@ -871,7 +950,127 @@ export default function CompanySourcingTool() {
     }
   };
 
-  // ── Excel Export ──
+  // #endregion
+
+  // #region Build Universe
+  const fetchBuildHistory = useCallback(async () => {
+    try {
+      const r = await fetch("/api/universe/builds");
+      const d = await r.json();
+      if (d.ok) setBuildHistory(d.builds || []);
+    } catch { /* */ }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "build") fetchBuildHistory();
+  }, [activeTab, fetchBuildHistory]);
+
+  const startBuild = async () => {
+    setBuildStatus("starting");
+    setBuildStats({ discovered: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
+    setBuildLog("Starting overnight universe build...");
+    setBuildStartedAt(Date.now());
+    try {
+      const payload = {
+        selectedVerticals: buildVerticals,
+        selectedProducts: buildProducts,
+        maxCandidates: buildMaxCandidates,
+        maxRunTimeHours: buildMaxRunHours,
+        depth: buildDepth,
+        stageBThreshold: buildStageBThreshold,
+        useOllama: buildUseOllama,
+        breadth: buildBreadth,
+      };
+      const res = await fetch("/api/universe/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId } = await res.json();
+      setBuildJobId(jobId);
+      setBuildStatus("running");
+
+      if (buildEventSourceRef.current) buildEventSourceRef.current.close();
+      const es = new EventSource(`/api/universe/build/${jobId}/stream`);
+      buildEventSourceRef.current = es;
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type?.startsWith("build:log")) {
+            setBuildLog(msg.message || "");
+          }
+          if (msg.discovered !== undefined) {
+            setBuildStats((prev) => ({
+              ...prev,
+              discovered: msg.discovered ?? prev.discovered,
+              basicEnriched: msg.basicEnriched ?? prev.basicEnriched,
+              fullyEnriched: msg.fullyEnriched ?? prev.fullyEnriched,
+              classified: msg.classified ?? prev.classified,
+              failed: msg.failed ?? prev.failed,
+              skipped: msg.skipped ?? prev.skipped,
+            }));
+          }
+          if (msg.type === "build:error") {
+            setBuildStatus("error");
+            setBuildLog(msg.message || "Build error");
+          }
+          if (msg.type === "build:timeout") {
+            setBuildStatus("stopped");
+            setBuildLog("Run ended: maximum run time reached.");
+            es.close();
+            buildEventSourceRef.current = null;
+            fetchBuildHistory();
+          }
+        } catch { /* */ }
+      };
+      es.onerror = () => {
+        es.close();
+        buildEventSourceRef.current = null;
+      };
+    } catch (e) {
+      setBuildStatus("error");
+      setBuildLog(e.message || "Failed to start build");
+    }
+  };
+
+  const pauseBuild = async () => {
+    if (!buildJobId) return;
+    await fetch(`/api/universe/build/${buildJobId}/pause`, { method: "POST" });
+    setBuildStatus("paused");
+  };
+
+  const resumeBuildFn = async () => {
+    if (!buildJobId) return;
+    await fetch(`/api/universe/build/${buildJobId}/resume`, { method: "POST" });
+    setBuildStatus("running");
+  };
+
+  const stopBuildFn = async () => {
+    if (!buildJobId) return;
+    await fetch(`/api/universe/build/${buildJobId}/stop`, { method: "POST" });
+    setBuildStatus("stopped");
+    if (buildEventSourceRef.current) {
+      buildEventSourceRef.current.close();
+      buildEventSourceRef.current = null;
+    }
+    fetchBuildHistory();
+  };
+
+  const buildElapsed = buildStartedAt ? Math.round((Date.now() - buildStartedAt) / 1000) : 0;
+  const buildThroughput = buildElapsed > 10 && buildStats.discovered > 0
+    ? Math.round((buildStats.discovered / buildElapsed) * 3600)
+    : null;
+  const buildRemainingSeconds = buildStartedAt
+    ? Math.max(0, Math.round(buildMaxRunHours * 3600 - buildElapsed))
+    : null;
+  const buildRemainingLabel =
+    buildRemainingSeconds == null
+      ? null
+      : `${Math.floor(buildRemainingSeconds / 3600)}h ${Math.floor((buildRemainingSeconds % 3600) / 60)}m remaining`;
+  // #endregion
+
+  // #region Excel export
   const exportToExcel = async () => {
     let rowsSrc = savedRows;
     if (!rowsSrc.length) {
@@ -989,7 +1188,9 @@ export default function CompanySourcingTool() {
     setExportFlash(true);
     setTimeout(() => setExportFlash(false), 1800);
   };
+  // #endregion
 
+  // #region Command palette
   const commandItems = useMemo(
     () => [
       {
@@ -1028,6 +1229,13 @@ export default function CompanySourcingTool() {
         label: "Go to Universe",
         group: "Navigate",
         action: () => setActiveTab("universe"),
+      },
+      {
+        id: "build",
+        label: "Go to Build Universe",
+        group: "Navigate",
+        keywords: "overnight builder",
+        action: () => setActiveTab("build"),
       },
       {
         id: "deleted",
@@ -1081,7 +1289,9 @@ export default function CompanySourcingTool() {
       }),
     )
     .sort((a, b) => (b.score || 0) - (a.score || 0));
+  // #endregion
 
+  // #region Render
   return (
     <DashboardShell>
       <AppBar
@@ -1103,6 +1313,7 @@ export default function CompanySourcingTool() {
               ["discover", "Discover"],
               ["saved", `Saved (${savedRows.length})`],
               ["universe", `Universe (${universeTotal})`],
+              ["build", "Build Universe"],
               ["deleted", `Deleted (${rejectedTotal})`],
             ].map(([id, lbl]) => (
               <button
@@ -1145,7 +1356,8 @@ export default function CompanySourcingTool() {
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-6">
+        <div ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-6">
+          {/* Discover tab */}
           {activeTab === "discover" && (
             <div className="animate-in-fade space-y-4">
               <div className="rounded-lg border border-border bg-card p-4 md:p-5 shadow-sm">
@@ -1742,12 +1954,19 @@ export default function CompanySourcingTool() {
                   onClick={() => setUniverseFilterDrawerOpen(true)}
                   className="text-left text-data text-primary hover:underline"
                 >
-                  {universeActiveFilterCount === 0
+                  {universeAppliedFilterCount === 0
                     ? "No filters applied · Add filters"
-                    : `${universeActiveFilterCount} filter${universeActiveFilterCount === 1 ? "" : "s"} active · Edit filters`}
+                    : `${universeAppliedFilterCount} filter${universeAppliedFilterCount === 1 ? "" : "s"} applied · Edit filters`}
                 </button>
               </div>
               <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={applyUniverseFilters}
+                  className="rounded-md border border-primary bg-primary px-3 py-2 text-data font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
+                >
+                  Apply filters
+                </button>
                 <button
                   type="button"
                   onClick={loadUniverseRows}
@@ -1889,6 +2108,316 @@ export default function CompanySourcingTool() {
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {activeTab === "build" && (
+            <div className="animate-in-fade space-y-5">
+              <div className="rounded-lg border border-border bg-card p-5 shadow-sm space-y-5">
+                <div>
+                  <h2 className="text-ui font-semibold text-foreground">Overnight Universe Builder</h2>
+                  <p className="mt-1 text-data text-muted-foreground">
+                    Discover and enrich companies in the background. Discovery is permissive &mdash; every candidate is stored even if it doesn&apos;t match current filters.
+                  </p>
+                </div>
+
+                {/* Config panel — only shown when not running */}
+                {(!buildStatus || buildStatus === "stopped" || buildStatus === "error") && (
+                  <div className="space-y-4">
+                    {/* Depth */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Depth</label>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ["metadata_only", "Metadata Only", "Stage A only — fast, 10k+ overnight"],
+                          ["standard", "Standard", "Stage A + B — full enrichment, 2-4k overnight"],
+                          ["deep", "Deep", "Stage A + B + Ollama — richest, 1-2k overnight"],
+                        ].map(([val, lbl, desc]) => (
+                          <button
+                            key={val}
+                            type="button"
+                            onClick={() => {
+                              setBuildDepth(val);
+                              if (val === "deep") setBuildStageBThreshold(55);
+                              else if (val === "standard") setBuildStageBThreshold(40);
+                            }}
+                            className={`rounded-md border px-3 py-2 text-left text-data transition-colors ${
+                              buildDepth === val
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border text-muted-foreground hover:bg-muted/50"
+                            }`}
+                          >
+                            <span className="font-semibold">{lbl}</span>
+                            <span className="ms-2 text-muted-foreground">{desc}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Volume & threshold */}
+                    <div className="flex flex-wrap gap-4">
+                      <div className="min-w-[180px] space-y-1">
+                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Target volume</label>
+                        <input
+                          type="range"
+                          min={500}
+                          max={50000}
+                          step={500}
+                          value={buildMaxCandidates}
+                          onChange={(e) => setBuildMaxCandidates(Number(e.target.value))}
+                          className="w-full"
+                        />
+                        <span className="text-data text-foreground">{buildMaxCandidates.toLocaleString()} companies</span>
+                      </div>
+                      <div className="min-w-[180px] space-y-1">
+                        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Maximum run time</label>
+                        <input
+                          type="range"
+                          min={1}
+                          max={24}
+                          step={1}
+                          value={buildMaxRunHours}
+                          onChange={(e) => setBuildMaxRunHours(Number(e.target.value))}
+                          className="w-full"
+                        />
+                        <span className="text-data text-foreground">
+                          {buildMaxRunHours} hour{buildMaxRunHours === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      {buildDepth !== "metadata_only" && (
+                        <div className="min-w-[180px] space-y-1">
+                          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Stage B threshold</label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={80}
+                            step={5}
+                            value={buildStageBThreshold}
+                            onChange={(e) => setBuildStageBThreshold(Number(e.target.value))}
+                            className="w-full"
+                          />
+                          <span className="text-data text-foreground">
+                            Priority score &ge; {buildStageBThreshold} for deep enrichment
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Breadth */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Breadth</label>
+                      <select
+                        value={buildBreadth}
+                        onChange={(e) => setBuildBreadth(e.target.value)}
+                        className="rounded-md border border-border bg-card px-3 py-2 text-data text-foreground"
+                      >
+                        <option value="focused">Focused (1x)</option>
+                        <option value="broad">Broad (2x)</option>
+                        <option value="exhaustive">Exhaustive (4x)</option>
+                      </select>
+                    </div>
+
+                    {/* Ollama toggle (deep only) */}
+                    {buildDepth === "deep" && (
+                      <label className="flex items-center gap-2 text-data text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={buildUseOllama}
+                          onChange={(e) => setBuildUseOllama(e.target.checked)}
+                          className="rounded border-border"
+                        />
+                        Use Ollama classifier (local LLM)
+                      </label>
+                    )}
+
+                    {/* Verticals */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Verticals</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {VERTICALS.map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            onClick={() =>
+                              setBuildVerticals((prev) =>
+                                prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]
+                              )
+                            }
+                            className={`rounded-md border px-2 py-1 text-data transition-colors ${
+                              buildVerticals.includes(v)
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border text-muted-foreground hover:bg-muted/50"
+                            }`}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Products */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Products</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {SOFTWARE_PRODUCT_KEYS.map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() =>
+                              setBuildProducts((prev) =>
+                                prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+                              )
+                            }
+                            className={`rounded-md border px-2 py-1 text-data transition-colors ${
+                              buildProducts.includes(p)
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "border-border text-muted-foreground hover:bg-muted/50"
+                            }`}
+                          >
+                            {SOFTWARE_PRODUCTS[p]?.icon} {p}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={startBuild}
+                      disabled={buildProducts.length === 0}
+                      className="rounded-md bg-primary px-6 py-2.5 text-ui font-semibold text-primary-foreground hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Start Build
+                    </button>
+                  </div>
+                )}
+
+                {/* Progress panel — shown when running/paused */}
+                {buildStatus && buildStatus !== "stopped" && buildStatus !== "error" && (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-data font-semibold ${
+                        buildStatus === "running"
+                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100"
+                          : buildStatus === "paused"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-100"
+                            : "border-border bg-muted text-muted-foreground"
+                      }`}>
+                        {buildStatus === "running" && "Running"}
+                        {buildStatus === "paused" && "Paused"}
+                        {buildStatus === "starting" && "Starting..."}
+                      </span>
+                      {buildThroughput && (
+                        <span className="text-data text-muted-foreground">
+                          ~{buildThroughput.toLocaleString()} discovered/hr
+                        </span>
+                      )}
+                      {buildRemainingLabel && (
+                        <span className="text-data text-muted-foreground">{buildRemainingLabel}</span>
+                      )}
+                    </div>
+
+                    {/* Stats grid */}
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                      {[
+                        ["Discovered", buildStats.discovered, "text-foreground"],
+                        ["Basic Enriched", buildStats.basicEnriched, "text-sky-600 dark:text-sky-400"],
+                        ["Fully Enriched", buildStats.fullyEnriched, "text-emerald-600 dark:text-emerald-400"],
+                        ["Classified", buildStats.classified, "text-violet-600 dark:text-violet-400"],
+                        ["Failed", buildStats.failed, "text-destructive"],
+                        ["Skipped", buildStats.skipped, "text-muted-foreground"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl} className="rounded-md border border-border bg-card p-3 text-center">
+                          <div className={`text-lg font-bold tabular-nums ${cls}`}>{val.toLocaleString()}</div>
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{lbl}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {buildLog && (
+                      <p className="truncate text-data text-muted-foreground">{buildLog}</p>
+                    )}
+
+                    {/* Control buttons */}
+                    <div className="flex flex-wrap gap-2">
+                      {buildStatus === "running" && (
+                        <button
+                          type="button"
+                          onClick={pauseBuild}
+                          className="rounded-md border border-amber-500/40 px-4 py-2 text-data font-medium text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      {buildStatus === "paused" && (
+                        <button
+                          type="button"
+                          onClick={resumeBuildFn}
+                          className="rounded-md border border-primary/40 px-4 py-2 text-data font-medium text-primary hover:bg-primary/10"
+                        >
+                          Resume
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={stopBuildFn}
+                        className="rounded-md border border-destructive/40 px-4 py-2 text-data font-medium text-destructive hover:bg-destructive/10"
+                      >
+                        Stop
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Completion / error state */}
+                {(buildStatus === "stopped" || buildStatus === "error") && buildStats.discovered > 0 && (
+                  <div className="rounded-md border border-border bg-muted/30 p-4 space-y-2">
+                    <p className="text-data font-semibold text-foreground">
+                      {buildStats.discovered.toLocaleString()} companies discovered
+                      {buildStats.fullyEnriched > 0 && ` — ${buildStats.fullyEnriched.toLocaleString()} fully enriched`}
+                      {buildStats.classified > 0 && `, ${buildStats.classified.toLocaleString()} scored`}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { setActiveTab("universe"); loadUniverseRows(); }}
+                      className="rounded-md bg-primary px-4 py-2 text-data font-semibold text-primary-foreground hover:opacity-95"
+                    >
+                      Browse Universe
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Build history */}
+              {buildHistory.length > 0 && (
+                <div className="rounded-lg border border-border bg-card p-4 shadow-sm space-y-3">
+                  <h3 className="text-ui font-semibold text-foreground">Recent Builds</h3>
+                  <div className="space-y-2">
+                    {buildHistory.map((b) => (
+                      <div key={b.id} className="flex flex-wrap items-center gap-3 rounded-md border border-border p-3 text-data">
+                        <span className={`rounded-full border px-2 py-0.5 text-data font-medium ${
+                          b.status === "RUNNING" ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100"
+                          : b.status === "DONE" ? "border-primary/40 bg-primary/10 text-primary"
+                          : b.status === "PAUSED" ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                          : "border-border bg-muted text-muted-foreground"
+                        }`}>
+                          {b.status}
+                        </span>
+                        <span className="text-muted-foreground">{b.config?.depth || "standard"}</span>
+                        <span className="tabular-nums text-foreground">
+                          {(b.stats?.discovered || 0).toLocaleString()} disc
+                        </span>
+                        <span className="tabular-nums text-foreground">
+                          {(b.stats?.fullyEnriched || 0).toLocaleString()} enriched
+                        </span>
+                        <span className="tabular-nums text-foreground">
+                          {(b.stats?.classified || 0).toLocaleString()} classified
+                        </span>
+                        <span className="text-muted-foreground">{b.created_at}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2220,7 +2749,7 @@ export default function CompanySourcingTool() {
           max={5000}
           step={50}
           value={maxCompanies}
-          onChange={(e) => setMaxCompanies(Math.min(5000, Math.max(50, parseInt(e.target.value, 10) || 2000)))}
+          onChange={(e) => setMaxCompanies(Math.min(5000, Math.max(50, parseInt(e.target.value, 10) || 1000)))}
           className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data text-foreground outline-none focus:ring-2 focus:ring-primary/25"
         />
         <label className="mt-3 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Discovery breadth</label>
@@ -2364,6 +2893,8 @@ export default function CompanySourcingTool() {
       )}
 
       <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} items={commandItems} />
+      <BackToTopButton scrollRef={mainScrollRef} />
     </DashboardShell>
   );
+  // #endregion
 }

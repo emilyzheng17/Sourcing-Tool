@@ -8,6 +8,11 @@ import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePage
 import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
 import { evaluateProductFit } from "./lib/productFit.js";
 import { shouldFastFailEnrichment } from "./lib/publicCompanySignals.js";
+import { cheapPreScore, DEFAULT_PRESCORE_THRESHOLD, DEFAULT_ACQUISITION_SCORE_THRESHOLD } from "./lib/cheapPreScore.js";
+import { getCached, putCached } from "./lib/dbCache.js";
+
+// #region Keyword lists & company-type classifier
+const BRAVE_ENRICH_CACHE_TTL_DAYS = 7;
 
 const MISSION_KW = [
   "system of record",
@@ -93,7 +98,9 @@ function classifyCompanyType(swHits, hwHits) {
   }
   return { companyType: "hybrid", companyTypeConfidence: Math.min(1, (swHits + hwHits) / 10) };
 }
+// #endregion
 
+// #region Website resolution & page extractors
 const EXTRA_PATHS = [
   "/leadership",
   "/contact",
@@ -227,46 +234,115 @@ function employeesTextFromBody(text) {
   if (!m) return null;
   return m[0].replace(/\s+/g, " ").trim().slice(0, 80);
 }
+// #endregion
 
-export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
+// #region Stage A — cheap pre-score
+/**
+ * Stage A: Lightweight homepage-only fetch + cheap pre-score.
+ * Returns null if the candidate should be discarded.
+ * Returns { resolved, domain, base, title, homepageHtml, homepageText, headers, cheapScore, metaDescription }
+ * for Stage B to continue with.
+ */
+export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {}) {
+  const threshold = parseInt(env?.PRESCORE_THRESHOLD, 10) || DEFAULT_PRESCORE_THRESHOLD;
+
   const resolved = await resolvePublicWebsite(candidate, fetchOpts);
   const domain = normalizeDomain(resolved.website);
   if (!domain || !isLikelyCompanyDomain(domain)) {
     return null;
   }
   const base = resolved.website.startsWith("http") ? resolved.website : `https://${resolved.website}`;
-  let origin;
-  try {
-    origin = new URL(base).origin;
-  } catch {
-    origin = base;
-  }
 
-  let combinedText = "";
+  let homepageHtml = "";
+  let homepageText = "";
   let title = resolved.name;
-  const allHeaders = {};
-  let fetchedPricingPath = false;
-  let rawHtmlForSocial = "";
+  let metaDescription = "";
+  const headers = {};
   let homepageFetched = false;
 
   try {
-    const { ok, text, headers } = await fetchText(base, { timeout: 12000, ...fetchOpts });
+    const { ok, text, headers: h } = await fetchText(base, {
+      timeout: 8000,
+      maxBytes: 25000,
+      ...fetchOpts,
+    });
     if (ok && text) {
       homepageFetched = true;
-      if (headers) Object.assign(allHeaders, headers);
+      if (h) Object.assign(headers, h);
+      homepageHtml = text;
       const $ = cheerio.load(text);
       const t = $("title").first().text().trim();
       if (t) title = t.split("|")[0].trim();
-      const body = visibleTextFromHtml(text).slice(0, 12000);
-      const gateCorpus = sanitizeScrapedPlainText(body).toLowerCase();
-      if (shouldFastFailEnrichment(gateCorpus)) {
-        return null;
-      }
-      combinedText += "\n" + body;
-      rawHtmlForSocial = text;
+      metaDescription = $('meta[name="description"]').attr("content") || "";
+      homepageText = visibleTextFromHtml(text).slice(0, 4000);
     }
   } catch {
-    /* fall through to sitemap + extra paths */
+    /* homepage unreachable — will be retried in Stage B if needed */
+  }
+
+  const sanitized = sanitizeScrapedPlainText(homepageText).toLowerCase();
+
+  const { cheapScore, fastFail, reasons } = cheapPreScore({
+    homepageText: sanitized,
+    title,
+    metaDescription,
+    candidate: resolved,
+    brief,
+  });
+
+  if (fastFail || cheapScore < threshold) {
+    return null;
+  }
+
+  return {
+    resolved,
+    domain,
+    base,
+    title,
+    homepageHtml,
+    homepageText,
+    headers,
+    homepageFetched,
+    metaDescription,
+    cheapScore,
+    cheapScoreReasons: reasons,
+  };
+}
+// #endregion
+
+// #region Stage B — deep enrichment
+/**
+ * Stage B: Deep enrichment for candidates that passed Stage A.
+ * Sub-page crawl, OpenCorporates, Brave acquisition (gated), ATS, etc.
+ */
+export async function enrichCandidateStageB(candidate, stageA, brief, env, fetchOpts = {}) {
+  const acquisitionThreshold =
+    parseInt(env?.ACQUISITION_SCORE_THRESHOLD, 10) || DEFAULT_ACQUISITION_SCORE_THRESHOLD;
+
+  const { resolved, domain, base, homepageHtml, headers: stageAHeaders, homepageFetched, cheapScore } = stageA;
+  let { title, homepageText } = stageA;
+
+  let combinedText = homepageText ? "\n" + homepageText : "";
+  const allHeaders = { ...stageAHeaders };
+  let fetchedPricingPath = false;
+  let rawHtmlForSocial = homepageHtml || "";
+
+  // If Stage A fetched a capped version, re-fetch full homepage for deep analysis
+  if (homepageFetched && homepageHtml.length >= 24500) {
+    try {
+      const { ok, text, headers } = await fetchText(base, { timeout: 12000, ...fetchOpts });
+      if (ok && text) {
+        if (headers) Object.assign(allHeaders, headers);
+        const $ = cheerio.load(text);
+        const t = $("title").first().text().trim();
+        if (t) title = t.split("|")[0].trim();
+        const body = visibleTextFromHtml(text).slice(0, 12000);
+        combinedText = "\n" + body;
+        rawHtmlForSocial = text;
+      }
+    } catch {
+      /* use Stage A data */
+    }
   }
 
   const pages = new Set();
@@ -350,17 +426,30 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
   }
 
   let braveSnippet = "";
-  if (env.BRAVE_API_KEY) {
+  if (env.BRAVE_API_KEY && cheapScore >= acquisitionThreshold) {
     try {
-      const q = `"${resolved.name}" acquired OR "private equity"`;
-      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
-      const res = await fetch(url, {
-        headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const results = data.web?.results || [];
-        braveSnippet = results.map((r) => r.description || "").join(" \n ");
+      const braveEnrichKey = `brave-enrich:${resolved.name}`;
+      const cachedBrave = getCached(braveEnrichKey, BRAVE_ENRICH_CACHE_TTL_DAYS);
+      let results;
+      if (cachedBrave) {
+        results = cachedBrave.ok ? (cachedBrave.payload || []) : [];
+      } else {
+        const q = `"${resolved.name}" acquired OR "private equity"`;
+        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
+        const res = await fetch(url, {
+          headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          results = data.web?.results || [];
+          putCached(braveEnrichKey, "brave-enrich", true, results);
+        } else {
+          putCached(braveEnrichKey, "brave-enrich", false, null);
+          results = [];
+        }
+      }
+      braveSnippet = results.map((r) => r.description || "").join(" \n ");
+      if (braveSnippet) {
         const acq = extractAcquisition(braveSnippet + " " + combinedText);
         if (acq.year && !acquisitionHistory.some((a) => a.year === acq.year))
           acquisitionHistory.push({ year: acq.year, acquirer: acq.acquirer, source: "web_snippet" });
@@ -464,7 +553,20 @@ export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
     techHints,
     pricingModel,
     employeesText,
+    cheapScore,
   };
+}
+// #endregion
+
+// #region Public API & text helpers
+/**
+ * Backward-compatible wrapper: runs Stage A + Stage B sequentially.
+ * Used by CLI scripts and tests that don't need granular control.
+ */
+export async function enrichCandidate(candidate, brief, env, fetchOpts = {}) {
+  const stageA = await enrichCandidateStageA(candidate, brief, env, fetchOpts);
+  if (!stageA) return null;
+  return enrichCandidateStageB(candidate, stageA, brief, env, fetchOpts);
 }
 
 function countKeywordHits(lower, list) {
@@ -487,10 +589,24 @@ function extractAcquisition(text) {
 }
 
 function inferFounderCEO(lower, companyName) {
+  // Explicit founder-and-CEO co-mentions in text
+  if (
+    /\b(founder\s*(?:&|and)\s*(?:ceo|cto|president|chief executive))\b/.test(lower) ||
+    /\b(co-?founder\s*(?:&|and)\s*(?:ceo|cto|president|chief executive))\b/.test(lower) ||
+    /\b(ceo\s*(?:&|and)\s*(?:founder|co-?founder))\b/.test(lower) ||
+    /\b(founded\s+(?:and|&)\s+(?:led|run|operated|managed)\s+by)\b/.test(lower) ||
+    /\b(founder[- ]led|founder[- ]operated|founder[- ]run)\b/.test(lower)
+  ) {
+    return true;
+  }
+
+  // CEO name overlaps with company name's first word (original heuristic)
   const m = lower.match(/(ceo|chief executive)[^\n.]{0,40}([a-z][a-z\s.'-]{2,40})/i);
-  if (!m) return "unknown";
-  const first = companyName.split(/\s+/)[0]?.toLowerCase();
-  if (first && m[0].toLowerCase().includes(first)) return true;
+  if (m) {
+    const first = companyName.split(/\s+/)[0]?.toLowerCase();
+    if (first && first.length > 2 && m[0].toLowerCase().includes(first)) return true;
+  }
+
   return "unknown";
 }
 
@@ -499,3 +615,4 @@ function buildDescription(text, name, product) {
   if (t.length < 40) return `${name} — B2B software vendor in ${product} (limited public text).`;
   return `${name}: ${t.slice(0, 240)}…`;
 }
+// #endregion

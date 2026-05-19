@@ -6,6 +6,7 @@ import { vertScoreFromVerticalFit } from "./lib/verticalFit.js";
 import { productFitThesisPenalty } from "./lib/productFit.js";
 import { inferOwnershipClass } from "./lib/ownershipClassify.js";
 
+// #region Scoring helpers
 /** @param {string|null|undefined} s */
 function employeeMidpoint(s) {
   if (!s || typeof s !== "string") return null;
@@ -82,7 +83,9 @@ function revenueScoreFromMillions(millions) {
   if ((millions >= 1 && millions < 2) || (millions > 10 && millions <= 20)) return 6;
   return 2;
 }
+// #endregion
 
+// #region scoreThesis
 export function scoreThesis(enriched, brief) {
   const text = (
     (enriched.homepageTextSample || "") +
@@ -111,7 +114,14 @@ export function scoreThesis(enriched, brief) {
   const { ownership_class, ownership_confidence } = inferOwnershipClass(enriched);
 
   const ownershipMatch =
-    ownership_class === "Vintage PE" || ownership_class === "Founder-Operated" ? 1 : 0;
+    ownership_class === "Founder Owned" ||
+    ownership_class === "Founder Operated" ||
+    // legacy class names (existing DB rows)
+    ownership_class === "Founder-Operated" ||
+    ownership_class === "Founder-Owned" ||
+    ownership_class === "Vintage PE"
+      ? 1
+      : 0;
 
   const empMid =
     employeeMidpoint(enriched.employees) ??
@@ -168,7 +178,9 @@ export function scoreThesis(enriched, brief) {
     classificationSource: "rule",
   };
 }
+// #endregion
 
+// #region applyManualOverrides
 export function applyManualOverrides(company, manual) {
   const m = { ...company };
   if (manual?.manual_mission_critical === "yes") m.missionCritical = true;
@@ -187,3 +199,4 @@ export function applyManualOverrides(company, manual) {
   if (touched) m.classificationSource = "manual";
   return m;
 }
+// #endregion

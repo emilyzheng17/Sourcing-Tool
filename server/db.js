@@ -2,12 +2,14 @@ import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 import { applyManualOverrides } from "./score.js";
+import queueSignal from "./lib/queueSignal.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.join(__dirname, "..", "universe.db");
 
 let db;
 
+// #region Schema & getDb
 export function getDb() {
   if (!db) {
     db = new Database(dbPath);
@@ -27,16 +29,94 @@ export function getDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_companies_domain ON companies(domain);
       CREATE INDEX IF NOT EXISTS idx_companies_saved ON companies(is_saved);
+
+      CREATE TABLE IF NOT EXISTS http_cache (
+        cache_key  TEXT PRIMARY KEY,
+        cache_type TEXT NOT NULL,
+        ok         INTEGER NOT NULL DEFAULT 1,
+        payload    TEXT,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_http_cache_type ON http_cache(cache_type);
     `);
     const cols = db.prepare("PRAGMA table_info(companies)").all();
     if (!cols.some((c) => c.name === "is_rejected")) {
       db.exec(`ALTER TABLE companies ADD COLUMN is_rejected INTEGER NOT NULL DEFAULT 0`);
     }
     db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_rejected ON companies(is_rejected)`);
+
+    // ── Overnight Universe Builder schema ──────────────────────────
+    const colNames = new Set(cols.map((c) => c.name));
+    const addCol = (name, def) => {
+      if (!colNames.has(name)) {
+        db.exec(`ALTER TABLE companies ADD COLUMN ${name} ${def}`);
+      }
+    };
+    addCol("status", "TEXT DEFAULT 'ACTIVE'");
+    addCol("priority_score", "REAL");
+    addCol("discovery_batch_id", "TEXT");
+    addCol("last_discovered_at", "TEXT");
+    addCol("last_enriched_at", "TEXT");
+    addCol("last_classified_at", "TEXT");
+    addCol("enrichment_attempt_count", "INTEGER DEFAULT 0");
+    addCol("error_message", "TEXT");
+    addCol("next_retry_at", "TEXT");
+
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_priority ON companies(priority_score)`);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS build_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'RUNNING',
+        config TEXT NOT NULL DEFAULT '{}',
+        stats TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs(status);
+
+      CREATE TABLE IF NOT EXISTS company_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL REFERENCES companies(id),
+        source_tag TEXT,
+        source_url TEXT,
+        raw_metadata TEXT DEFAULT '{}',
+        discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+        batch_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_company_sources_company ON company_sources(company_id);
+
+      CREATE TABLE IF NOT EXISTS enrichment_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        job_type TEXT NOT NULL,
+        thesis_version TEXT,
+        priority REAL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        next_retry_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_eq_status_priority ON enrichment_queue(status, priority DESC);
+      CREATE INDEX IF NOT EXISTS idx_eq_company_job ON enrichment_queue(company_id, job_type);
+
+      CREATE TABLE IF NOT EXISTS company_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        data TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_ce_company ON company_events(company_id);
+    `);
   }
   return db;
 }
+// #endregion
 
+// #region Company CRUD
 export function upsertCompany({ domain, name, website, data, isSaved }) {
   const d = getDb();
   const row = d.prepare(
@@ -63,6 +143,16 @@ export function getCompanyById(id) {
 
 export function getCompanyByDomain(domain) {
   return getDb().prepare("SELECT * FROM companies WHERE domain = ?").get(domain);
+}
+
+export function getFreshCompanyByDomain(domain, ttlDays) {
+  return getDb()
+    .prepare(
+      `SELECT * FROM companies
+       WHERE domain = ?
+         AND updated_at >= datetime('now', ? || ' days')`
+    )
+    .get(domain, `-${ttlDays}`);
 }
 
 export function setSaved(id, saved) {
@@ -158,10 +248,14 @@ export function listActiveCompanySimilarityStubs() {
   return rows;
 }
 
-/** Active rows in default universe list order (for filtered pagination). */
+/** Active rows in thesis-score order (for filtered pagination). */
 export function iterateActiveUniverseRows() {
   return getDb()
-    .prepare(`SELECT * FROM companies WHERE is_rejected = 0 ORDER BY updated_at DESC`)
+    .prepare(
+      `SELECT * FROM companies WHERE is_rejected = 0
+       ORDER BY COALESCE(json_extract(data, '$.score'), json_extract(data, '$.thesisScore'), 0) DESC,
+                updated_at DESC`
+    )
     .iterate();
 }
 
@@ -170,7 +264,164 @@ export function getCompaniesByIds(ids) {
   const placeholders = ids.map(() => "?").join(",");
   return getDb().prepare(`SELECT * FROM companies WHERE id IN (${placeholders})`).all(...ids);
 }
+// #endregion
 
+// #region Overnight Universe Builder
+export function createBuildJob(id, config) {
+  const d = getDb();
+  d.prepare(
+    `INSERT INTO build_jobs (id, status, config, stats) VALUES (?, 'RUNNING', ?, '{}')`
+  ).run(id, JSON.stringify(config));
+}
+
+export function getBuildJob(id) {
+  return getDb().prepare("SELECT * FROM build_jobs WHERE id = ?").get(id);
+}
+
+export function listBuildJobs(limit = 20) {
+  return getDb()
+    .prepare("SELECT * FROM build_jobs ORDER BY created_at DESC LIMIT ?")
+    .all(limit);
+}
+
+export function updateBuildJobStatus(id, status) {
+  getDb()
+    .prepare("UPDATE build_jobs SET status = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(status, id);
+}
+
+export function updateBuildJobStats(id, stats) {
+  getDb()
+    .prepare("UPDATE build_jobs SET stats = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(JSON.stringify(stats), id);
+}
+
+export function upsertDiscoveredCompany({ domain, name, website, batchId, priorityScore }) {
+  const d = getDb();
+  const row = d.prepare(
+    "SELECT id, status, is_saved, is_rejected FROM companies WHERE domain = ?"
+  ).get(domain);
+  if (row) {
+    d.prepare(
+      `UPDATE companies SET
+         last_discovered_at = datetime('now'),
+         discovery_batch_id = COALESCE(?, discovery_batch_id),
+         priority_score = COALESCE(?, priority_score),
+         updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(batchId, priorityScore, row.id);
+    return row.id;
+  }
+  const info = d.prepare(
+    `INSERT INTO companies (domain, name, website, status, discovery_batch_id, last_discovered_at, priority_score, data)
+     VALUES (?, ?, ?, 'DISCOVERED', ?, datetime('now'), ?, '{}')`
+  ).run(domain, name ?? null, website ?? null, batchId, priorityScore ?? null);
+  return Number(info.lastInsertRowid);
+}
+
+export function insertCompanySource({ companyId, sourceTag, sourceUrl, rawMetadata, batchId }) {
+  getDb()
+    .prepare(
+      `INSERT INTO company_sources (company_id, source_tag, source_url, raw_metadata, batch_id)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(companyId, sourceTag, sourceUrl ?? null, JSON.stringify(rawMetadata ?? {}), batchId);
+}
+
+export function insertEnrichmentJob({ companyId, jobType, priority, thesisVersion }) {
+  const d = getDb();
+  const existing = d.prepare(
+    "SELECT id FROM enrichment_queue WHERE company_id = ? AND job_type = ? AND status IN ('PENDING','RUNNING')"
+  ).get(companyId, jobType);
+  if (existing) return existing.id;
+  const info = d.prepare(
+    `INSERT INTO enrichment_queue (company_id, job_type, priority, thesis_version)
+     VALUES (?, ?, ?, ?)`
+  ).run(companyId, jobType, priority ?? 0, thesisVersion ?? null);
+  queueSignal.emit("enqueued", { companyId, jobType });
+  return Number(info.lastInsertRowid);
+}
+
+export function claimEnrichmentJobs(jobType, limit = 4) {
+  const d = getDb();
+  const rows = d.prepare(
+    `SELECT eq.*, c.domain, c.name, c.website, c.data, c.priority_score
+     FROM enrichment_queue eq
+     JOIN companies c ON c.id = eq.company_id
+     WHERE eq.status = 'PENDING'
+       AND eq.job_type = ?
+       AND (eq.next_retry_at IS NULL OR eq.next_retry_at <= datetime('now'))
+     ORDER BY eq.priority DESC
+     LIMIT ?`
+  ).all(jobType, limit);
+  if (rows.length) {
+    const ids = rows.map((r) => r.id);
+    d.prepare(
+      `UPDATE enrichment_queue SET status = 'RUNNING' WHERE id IN (${ids.map(() => "?").join(",")})`
+    ).run(...ids);
+  }
+  return rows;
+}
+
+export function completeEnrichmentJob(queueId) {
+  getDb()
+    .prepare("UPDATE enrichment_queue SET status = 'DONE' WHERE id = ?")
+    .run(queueId);
+}
+
+export function failEnrichmentJob(queueId, errorMsg, maxAttempts = 3) {
+  const d = getDb();
+  const row = d.prepare("SELECT attempt_count FROM enrichment_queue WHERE id = ?").get(queueId);
+  const attempts = (row?.attempt_count ?? 0) + 1;
+  if (attempts >= maxAttempts) {
+    d.prepare(
+      "UPDATE enrichment_queue SET status = 'FAILED', attempt_count = ?, error = ? WHERE id = ?"
+    ).run(attempts, errorMsg, queueId);
+  } else {
+    const backoffMin = Math.pow(5, attempts);
+    d.prepare(
+      `UPDATE enrichment_queue
+       SET status = 'PENDING', attempt_count = ?, error = ?,
+           next_retry_at = datetime('now', '+' || ? || ' minutes')
+       WHERE id = ?`
+    ).run(attempts, errorMsg, backoffMin, queueId);
+  }
+}
+
+export function updateCompanyStatus(id, status, extraCols = {}) {
+  const d = getDb();
+  const sets = ["status = ?", "updated_at = datetime('now')"];
+  const vals = [status];
+  for (const [col, val] of Object.entries(extraCols)) {
+    sets.push(`${col} = ?`);
+    vals.push(val);
+  }
+  vals.push(id);
+  d.prepare(`UPDATE companies SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+export function insertCompanyEvent(companyId, eventType, data = {}) {
+  getDb()
+    .prepare("INSERT INTO company_events (company_id, event_type, data) VALUES (?, ?, ?)")
+    .run(companyId, eventType, JSON.stringify(data));
+}
+
+export function getEnrichmentQueueStats(batchId) {
+  const d = getDb();
+  const rows = d.prepare(
+    `SELECT eq.status, COUNT(*) as cnt
+     FROM enrichment_queue eq
+     JOIN companies c ON c.id = eq.company_id
+     WHERE c.discovery_batch_id = ?
+     GROUP BY eq.status`
+  ).all(batchId);
+  const stats = {};
+  for (const r of rows) stats[r.status] = r.cnt;
+  return stats;
+}
+// #endregion
+
+// #region Row mapping
 export function rowToCompany(row) {
   if (!row) return null;
   let data = {};
@@ -197,3 +448,14 @@ export function rowToCompany(row) {
     manual_proprietary: row.manual_proprietary,
   });
 }
+// #endregion
+
+// #region Queue helpers
+export function countPendingJobs(batchId) {
+  return getDb().prepare(
+    `SELECT COUNT(*) as cnt FROM enrichment_queue eq
+     JOIN companies c ON c.id = eq.company_id
+     WHERE c.discovery_batch_id = ? AND eq.status IN ('PENDING','RUNNING')`
+  ).get(batchId).cnt;
+}
+// #endregion

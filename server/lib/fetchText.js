@@ -1,4 +1,7 @@
+import { getCached, putCached } from "./dbCache.js";
+
 const UA = "SourcingTool/1.0 (+https://github.com/)";
+const FETCH_CACHE_TTL_DAYS = 7;
 
 /** Avoid multi-GB heaps: discovery + enrichment can fetch many unique URLs. */
 const MAX_FETCH_CACHE_BYTES = 110 * 1024 * 1024;
@@ -63,6 +66,7 @@ function hostnameOf(url) {
  * @param {string} url
  * @param {{
  *   timeout?: number,
+ *   maxBytes?: number,
  *   headers?: Record<string, string>,
  *   cache?: Map<string, { ok: boolean, status: number, text: string, url: string, headers: Record<string, string> }>,
  *   jitterHostState?: Map<string, number>,
@@ -72,6 +76,20 @@ export async function fetchText(url, opts = {}) {
   const cache = opts.cache;
   if (cache?.has(url)) {
     return { ...cache.get(url) };
+  }
+
+  const dbKey = `fetch:${url}`;
+  const cached = getCached(dbKey, FETCH_CACHE_TTL_DAYS);
+  if (cached) {
+    const entry = {
+      ok: cached.ok,
+      status: cached.payload?.status ?? (cached.ok ? 200 : 0),
+      text: cached.payload?.text ?? "",
+      url: cached.payload?.url ?? url,
+      headers: {},
+    };
+    if (cache) putFetchCache(cache, url, entry);
+    return entry;
   }
 
   const host = hostnameOf(url);
@@ -96,7 +114,7 @@ export async function fetchText(url, opts = {}) {
       },
       redirect: "follow",
     });
-    const text = await res.text();
+    const text = opts.maxBytes ? await readBodyCapped(res, opts.maxBytes) : await res.text();
     const headers = {};
     try {
       res.headers.forEach((v, k) => {
@@ -107,8 +125,41 @@ export async function fetchText(url, opts = {}) {
     }
     const out = { ok: res.ok, status: res.status, text, url: res.url, headers };
     if (cache) putFetchCache(cache, url, out);
+    putCached(dbKey, "fetch", res.ok, { text, status: res.status, url: res.url });
     return out;
+  } catch (err) {
+    putCached(dbKey, "fetch", false, { error: err.message });
+    throw err;
   } finally {
     clearTimeout(t);
   }
+}
+
+/**
+ * Read response body up to `maxBytes` then abort the stream.
+ * Returns a UTF-8 string (may be truncated mid-character at boundary).
+ */
+async function readBodyCapped(res, maxBytes) {
+  if (!res.body) return await res.text();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let result = "";
+  let bytesRead = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytesRead += value.byteLength;
+      if (bytesRead > maxBytes) {
+        const excess = bytesRead - maxBytes;
+        const trimmed = value.slice(0, value.byteLength - excess);
+        result += decoder.decode(trimmed, { stream: false });
+        break;
+      }
+      result += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return result;
 }

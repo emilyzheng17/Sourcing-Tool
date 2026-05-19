@@ -1,6 +1,7 @@
 import { normalizeToIso2 } from "./geoCountry.js";
 import { VERTICAL_MATCH_THRESHOLD } from "./verticalFitConstants.js";
 
+// #region Band matchers
 export function inFoundedEra(year, label) {
   if (label === "Any Era" || year == null || Number.isNaN(Number(year))) return true;
   const y = Number(year);
@@ -74,15 +75,41 @@ export function matchesCompanyTypeFilter(c, filter) {
   if (filter === "Unknown") return t === "unknown";
   return true;
 }
+// #endregion
+
+// #region Ownership normalization
+/**
+ * Maps old DB ownership class strings to their canonical new equivalents.
+ * Lets the filter work on records written before the rename.
+ * @param {string} oc
+ */
+function normalizeOwnershipClass(oc) {
+  switch (oc) {
+    case "Founder-Operated":
+      return "Founder Operated";
+    case "Founder-Owned":
+      return "Founder Owned";
+    case "VC-Backed":
+      return "VC Backed";
+    case "Vintage PE":
+    case "Recent PE":
+    case "Private Equity":
+    case "Acquired":
+      return "PE Owned";
+    case "Family-Owned":
+    case "Employee-Owned (ESOP)":
+      return "Founder Owned";
+    default:
+      return oc;
+  }
+}
 
 /** @param {string|null|undefined} ownershipClass */
 export function companyOwnershipMatchesFilter(ownershipClass, filter) {
-  const oc = ownershipClass || "";
-  if (filter === "Private Equity") {
-    return oc === "Private Equity" || oc === "Vintage PE" || oc === "Recent PE";
-  }
-  return oc === filter;
+  const normalized = normalizeOwnershipClass(ownershipClass || "");
+  return normalized === filter;
 }
+// #endregion
 
 /**
  * @typedef {object} DiscoverFilterCriteria
@@ -109,6 +136,7 @@ export function companyOwnershipMatchesFilter(ownershipClass, filter) {
  * @param {object} c Company row (discover or universe)
  * @param {DiscoverFilterCriteria} criteria
  */
+// #region companyPassesDiscoverFilters
 export function companyPassesDiscoverFilters(c, criteria) {
   if (criteria.excludeRejected && c.is_rejected) return false;
 
@@ -141,11 +169,9 @@ export function companyPassesDiscoverFilters(c, criteria) {
   if (criteria.thesisRequireMissionCritical && !c.missionCritical) return false;
   if (criteria.thesisRequireVertIntegrated && !c.verticallyIntegrated) return false;
   if (criteria.thesisRequireProprietary && !c.proprietaryStack) return false;
-  if (
-    criteria.thesisRequireFounderVintage &&
-    !["Founder-Operated", "Vintage PE"].includes(c.ownership_class || "")
-  ) {
-    return false;
+  if (criteria.thesisRequireFounderVintage) {
+    const normalized = normalizeOwnershipClass(c.ownership_class || "");
+    if (!["Founder Owned", "Founder Operated"].includes(normalized)) return false;
   }
   if (criteria.minOwnershipConfidence > 0 && (c.ownership_confidence || 0) < criteria.minOwnershipConfidence) {
     return false;
@@ -183,3 +209,4 @@ export function companyPassesDiscoverFilters(c, criteria) {
 
   return true;
 }
+// #endregion

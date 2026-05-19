@@ -36,42 +36,67 @@ test("ideal revenue band matches midpoint", () => {
   );
 });
 
-test("ownership filter exact match on ownership_class", () => {
-  const c = { ownership_class: "Vintage PE", is_rejected: false };
-  assert.ok(
-    companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Vintage PE" }),
-  );
-  assert.ok(
-    !companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Founder-Operated" }),
-  );
-});
-
-test("Private Equity filter matches Vintage PE, Recent PE, and Private Equity", () => {
-  for (const oc of ["Vintage PE", "Recent PE", "Private Equity"]) {
+test("ownership filter: new class names match directly", () => {
+  for (const oc of ["Founder Owned", "Founder Operated", "VC Backed", "PE Owned"]) {
     const c = { ownership_class: oc, is_rejected: false };
     assert.ok(
-      companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Private Equity" }),
-      `expected ${oc} to match Private Equity filter`,
+      companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: oc }),
+      `expected ${oc} to match its own filter`,
+    );
+    assert.ok(
+      !companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Unknown" }),
+      `expected ${oc} NOT to match Unknown filter`,
     );
   }
-  const other = { ownership_class: "VC-Backed", is_rejected: false };
-  assert.ok(
-    !companyPassesDiscoverFilters(other, { ...baseCriteria, ownershipFilter: "Private Equity" }),
-  );
 });
 
-test("companyOwnershipMatchesFilter helper", () => {
-  assert.ok(companyOwnershipMatchesFilter("Vintage PE", "Private Equity"));
-  assert.ok(companyOwnershipMatchesFilter("Recent PE", "Private Equity"));
-  assert.ok(companyOwnershipMatchesFilter("Private Equity", "Private Equity"));
-  assert.ok(!companyOwnershipMatchesFilter("VC-Backed", "Private Equity"));
-  assert.ok(companyOwnershipMatchesFilter("VC-Backed", "VC-Backed"));
+test("ownership filter: legacy PE class names map to PE Owned", () => {
+  for (const oc of ["Vintage PE", "Recent PE", "Private Equity", "Acquired"]) {
+    const c = { ownership_class: oc, is_rejected: false };
+    assert.ok(
+      companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "PE Owned" }),
+      `expected legacy class ${oc} to match PE Owned filter`,
+    );
+  }
 });
 
-test("VC-Backed filter exact match", () => {
+test("ownership filter: legacy VC-Backed maps to VC Backed", () => {
   const c = { ownership_class: "VC-Backed", is_rejected: false };
-  assert.ok(companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "VC-Backed" }));
-  assert.ok(!companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Family-Owned" }));
+  assert.ok(companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "VC Backed" }));
+  assert.ok(!companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "PE Owned" }));
+});
+
+test("ownership filter: legacy Founder-Operated maps to Founder Operated", () => {
+  const c = { ownership_class: "Founder-Operated", is_rejected: false };
+  assert.ok(companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Founder Operated" }));
+  assert.ok(!companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Founder Owned" }));
+});
+
+test("ownership filter: legacy Family-Owned and ESOP map to Founder Owned", () => {
+  for (const oc of ["Family-Owned", "Employee-Owned (ESOP)"]) {
+    const c = { ownership_class: oc, is_rejected: false };
+    assert.ok(
+      companyPassesDiscoverFilters(c, { ...baseCriteria, ownershipFilter: "Founder Owned" }),
+      `expected ${oc} to map to Founder Owned`,
+    );
+  }
+});
+
+test("companyOwnershipMatchesFilter helper: canonical names", () => {
+  assert.ok(companyOwnershipMatchesFilter("Founder Owned", "Founder Owned"));
+  assert.ok(companyOwnershipMatchesFilter("Founder Operated", "Founder Operated"));
+  assert.ok(companyOwnershipMatchesFilter("VC Backed", "VC Backed"));
+  assert.ok(companyOwnershipMatchesFilter("PE Owned", "PE Owned"));
+  assert.ok(!companyOwnershipMatchesFilter("VC Backed", "PE Owned"));
+});
+
+test("companyOwnershipMatchesFilter helper: legacy names normalise correctly", () => {
+  assert.ok(companyOwnershipMatchesFilter("Vintage PE", "PE Owned"));
+  assert.ok(companyOwnershipMatchesFilter("Recent PE", "PE Owned"));
+  assert.ok(companyOwnershipMatchesFilter("Private Equity", "PE Owned"));
+  assert.ok(companyOwnershipMatchesFilter("VC-Backed", "VC Backed"));
+  assert.ok(companyOwnershipMatchesFilter("Founder-Operated", "Founder Operated"));
+  assert.ok(!companyOwnershipMatchesFilter("VC-Backed", "PE Owned"));
 });
 
 test("verticals require label intersection or strict fit score", () => {

@@ -1,20 +1,21 @@
 import { getClassifier } from "./providers/index.js";
-import { enrichCandidate } from "./enrich.js";
+import { enrichCandidateStageA, enrichCandidateStageB } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
 import { normalizeDomain } from "./lib/domains.js";
 import { discoverMergedCandidatesStreaming } from "./lib/candidateDiscovery.js";
-import { upsertCompany, getCompanyByDomain, getCompanyById, rowToCompany } from "./db.js";
+import { upsertCompany, getCompanyByDomain, getCompanyById, getFreshCompanyByDomain, rowToCompany } from "./db.js";
 import { breadthMultiplier } from "./lib/breadth.js";
 import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
 import { normalizeToIso2 } from "../shared/geoCountry.js";
 import { resetFetchCacheAccounting } from "./lib/fetchText.js";
 import PQueue from "p-queue";
 
+// #region Pipeline config
 const JOB_MS_MIN = 10 * 60 * 1000;
 const JOB_MS_MAX = 90 * 60 * 1000;
 
 function clampedMaxCompanies(brief) {
-  return Math.min(5000, Math.max(50, parseInt(String(brief.maxCompanies ?? 2000), 10) || 1000));
+  return Math.min(5000, Math.max(50, parseInt(String(brief.maxCompanies ?? 1000), 10) || 1000));
 }
 
 /**
@@ -42,7 +43,9 @@ function applyPaidHints(candidate) {
     revenue: candidate.revenue ?? null,
   };
 }
+// #endregion
 
+// #region runSearchPipeline
 export async function runSearchPipeline(brief, env, emit) {
   const exclude = new Set((brief.excludeDomains || []).map((x) => normalizeDomain(x)).filter(Boolean));
 
@@ -61,6 +64,7 @@ export async function runSearchPipeline(brief, env, emit) {
 
   let completed = 0;
   const progress = { scheduled: 0 };
+  const ttlDays = brief.cacheMaxAgeDays ?? Number(env.ENRICH_CACHE_TTL_DAYS || 30);
 
   const { timedOut: mergeTimedOut } = await discoverMergedCandidatesStreaming(
     brief,
@@ -82,10 +86,27 @@ export async function runSearchPipeline(brief, env, emit) {
         const c = getLatest();
         if (!c) return;
 
+        const domainGuess = normalizeDomain(c.website || c.domain || "");
+        if (domainGuess) {
+          const cached = getFreshCompanyByDomain(domainGuess, ttlDays);
+          if (cached) {
+            completed += 1;
+            emit({ type: "log", message: `Cache hit (${ttlDays}d TTL): ${cached.name || domainGuess}` });
+            emit({ type: "company", company: rowToCompany(cached) });
+            emit({ type: "progress", processed: completed, total: progress.scheduled });
+            return;
+          }
+        }
+
         const seeded = applyPaidHints(c);
         let enriched;
         try {
-          enriched = await enrichCandidate(seeded, brief, env, fetchOpts);
+          const stageA = await enrichCandidateStageA(seeded, brief, env, fetchOpts);
+          if (!stageA) {
+            emit({ type: "log", message: `Pre-score reject: ${c.name}` });
+            return;
+          }
+          enriched = await enrichCandidateStageB(seeded, stageA, brief, env, fetchOpts);
         } catch (e) {
           emit({ type: "log", message: `Skip ${c.name}: ${e.message}` });
         } finally {
@@ -219,3 +240,4 @@ export async function runSearchPipeline(brief, env, emit) {
 
   emit({ type: "done", total: progress.scheduled, processed: completed, timedOut: !!timedOut });
 }
+// #endregion

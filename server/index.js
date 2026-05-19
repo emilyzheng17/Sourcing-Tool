@@ -21,17 +21,28 @@ import {
 import { companyPassesDiscoverFilters } from "../shared/discoverCompanyFilter.js";
 import { expandFromSavedPortfolio } from "./lib/savedProfileExpand.js";
 import { stubFromRow, findSimilarToAnchors } from "./lib/companySimilarity.js";
+import {
+  startUniverseBuild,
+  pauseBuild,
+  resumeBuild,
+  stopBuild,
+  getActiveJob,
+} from "./overnightPipeline.js";
+import { getBuildJob, listBuildJobs } from "./db.js";
 
 // Undici's fetch() attaches several internal listeners per in-flight request. The search
 // pipeline runs many concurrent fetches (see pipeline.js p-limit); default limit is 10.
 EventEmitter.defaultMaxListeners = Math.max(EventEmitter.defaultMaxListeners || 10, 32);
 
+// #region App setup
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 const jobs = new Map();
+// #endregion
 
+// #region Health & settings
 app.get("/api/health", (_req, res) => {
   getDb();
   res.json({ ok: true });
@@ -52,7 +63,9 @@ app.get("/api/settings-status", (_req, res) => {
     ollama: !!(env.OLLAMA_URL || true),
   });
 });
+// #endregion
 
+// #region Search jobs & SSE
 app.post("/api/search", async (req, res) => {
   const jobId = randomUUID();
   const brief = req.body || {};
@@ -106,7 +119,9 @@ app.get("/api/search/:jobId/stream", (req, res) => {
     job.subscribers.delete(listener);
   });
 });
+// #endregion
 
+// #region Recommendations
 app.post("/api/recommendations/from-saved", async (req, res) => {
   try {
     const body = req.body || {};
@@ -132,7 +147,9 @@ app.post("/api/recommendations/from-saved", async (req, res) => {
     res.status(500).json({ ok: false, message: e.message || String(e) });
   }
 });
+// #endregion
 
+// #region Universe & company routes
 app.get("/api/universe", (req, res) => {
   const offset = parseInt(req.query.offset || "0", 10) || 0;
   const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 5000);
@@ -267,8 +284,112 @@ app.post("/api/universe/similar-to-rejected", (req, res) => {
     res.status(500).json({ ok: false, message: e.message || String(e) });
   }
 });
+// #endregion
+
+// #region Server listen
+// ── Overnight Universe Builder API ─────────────────────────────
+
+const buildJobs = new Map();
+
+app.post("/api/universe/build", async (req, res) => {
+  try {
+    const config = req.body || {};
+    buildJobs.set("_pending", { subscribers: new Set() });
+
+    const jobId = await startUniverseBuild(config, process.env, (evt) => {
+      const entry = buildJobs.get(jobId) || buildJobs.get("_pending");
+      if (!entry) return;
+      for (const fn of entry.subscribers) {
+        try { fn(evt); } catch { /* */ }
+      }
+    });
+
+    const pending = buildJobs.get("_pending");
+    buildJobs.delete("_pending");
+    buildJobs.set(jobId, {
+      subscribers: pending?.subscribers || new Set(),
+    });
+
+    const active = getActiveJob(jobId);
+    if (active) {
+      active.subscribers = buildJobs.get(jobId).subscribers;
+    }
+
+    res.json({ jobId });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.get("/api/universe/build/:jobId", (req, res) => {
+  const job = getBuildJob(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ ok: false, message: "Build job not found" });
+    return;
+  }
+  let stats = {};
+  try { stats = JSON.parse(job.stats || "{}"); } catch { /* */ }
+  let config = {};
+  try { config = JSON.parse(job.config || "{}"); } catch { /* */ }
+  res.json({ ok: true, id: job.id, status: job.status, config, stats, created_at: job.created_at, updated_at: job.updated_at });
+});
+
+app.get("/api/universe/build/:jobId/stream", (req, res) => {
+  const jobId = req.params.jobId;
+  let entry = buildJobs.get(jobId);
+  if (!entry) {
+    const active = getActiveJob(jobId);
+    if (!active) {
+      res.status(404).end();
+      return;
+    }
+    entry = { subscribers: active.subscribers || new Set() };
+    buildJobs.set(jobId, entry);
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (evt) => {
+    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+  };
+  entry.subscribers.add(send);
+  req.on("close", () => {
+    entry.subscribers.delete(send);
+  });
+});
+
+app.post("/api/universe/build/:jobId/pause", (req, res) => {
+  pauseBuild(req.params.jobId);
+  res.json({ ok: true, status: "PAUSED" });
+});
+
+app.post("/api/universe/build/:jobId/resume", (req, res) => {
+  resumeBuild(req.params.jobId);
+  res.json({ ok: true, status: "RUNNING" });
+});
+
+app.post("/api/universe/build/:jobId/stop", (req, res) => {
+  stopBuild(req.params.jobId);
+  res.json({ ok: true, status: "STOPPED" });
+});
+
+app.get("/api/universe/builds", (_req, res) => {
+  const rows = listBuildJobs(20);
+  const result = rows.map((r) => {
+    let stats = {};
+    try { stats = JSON.parse(r.stats || "{}"); } catch { /* */ }
+    let config = {};
+    try { config = JSON.parse(r.config || "{}"); } catch { /* */ }
+    return { id: r.id, status: r.status, config, stats, created_at: r.created_at, updated_at: r.updated_at };
+  });
+  res.json({ ok: true, builds: result });
+});
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 app.listen(PORT, () => {
   console.log(`Sourcing API http://127.0.0.1:${PORT}`);
 });
+// #endregion

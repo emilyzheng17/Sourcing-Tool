@@ -53,6 +53,7 @@ export function DiscoverFilterPanel({
   onApplyIdealProfile,
   onResetIdealProfile,
 }) {
+  // #region Render
   return (
     <>
       <div className="mb-4 flex gap-0 border-b border-border">
@@ -330,7 +331,7 @@ export function DiscoverFilterPanel({
               checked={thesisRequireFounderVintage}
               onChange={(e) => setThesisRequireFounderVintage(e.target.checked)}
             />
-            Founder-op or vintage PE
+            Founder-owned or operated
           </label>
           <label className="mt-2 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             Min ownership confidence
@@ -358,4 +359,5 @@ export function DiscoverFilterPanel({
       )}
     </>
   );
+  // #endregion
 }
