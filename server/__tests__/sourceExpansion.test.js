@@ -10,6 +10,7 @@ import { testParseSaaSHubListings } from "../sources/saashub.js";
 import { testParseAlternativeToListings } from "../sources/alternativeTo.js";
 import { extractMarketplaceLinks } from "../sources/marketplacePages.js";
 import { pathsForProduct, SOFTWARE_ADVICE_PATHS } from "../lib/productCategoryPaths.js";
+import { testParseSerperResults } from "../sources/serper.js";
 
 test("PE firm seed list includes planned expansion firms", () => {
   const ids = new Set(PE_FIRMS.map((f) => f.id));
@@ -92,6 +93,19 @@ test("AlternativeTo parser extracts software about links", () => {
   const rows = testParseAlternativeToListings(html);
   assert.equal(rows.length, 1);
   assert.ok(rows[0].website.includes("/software/acme-erp/about"));
+});
+
+test("Serper parser extracts organic result links", () => {
+  const data = {
+    organic: [
+      { link: "https://www.acmefleet.com/", title: "Acme Fleet Software", snippet: "Fleet management SaaS." },
+      { link: "https://www.google.com/", title: "Google", snippet: "Search engine." },
+    ],
+  };
+  const rows = testParseSerperResults(data);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].website, "https://www.acmefleet.com/");
+  assert.equal(rows[0].sourceTag, "Serper");
 });
 
 test("marketplace link harvest skips marketplace host", () => {

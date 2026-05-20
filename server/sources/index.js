@@ -5,6 +5,7 @@ import { searchG2 } from "./g2.js";
 import { searchCapterra } from "./capterra.js";
 import { searchGetApp } from "./getApp.js";
 import { searchBrave } from "./brave.js";
+import { searchSerper } from "./serper.js";
 import { searchExa } from "./exa.js";
 import { searchApollo } from "./apollo.js";
 import { searchCrunchbase } from "./crunchbase.js";
@@ -48,6 +49,7 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
     settle("capterra", searchCapterra(brief, fo)),
     settle("getapp", searchGetApp(brief, fo)),
     settle("brave", searchBrave(brief, env)),
+    settle("serper", searchSerper(brief, env)),
     settle("exa", searchExa(brief, env)),
     settle("apollo", searchApollo(brief, env)),
     settle("crunchbase", searchCrunchbase(brief, env)),
@@ -79,6 +81,7 @@ export async function fanOutSources(brief, env, fetchOpts) {
     capterra: [],
     getapp: [],
     brave: [],
+    serper: [],
     exa: [],
     apollo: [],
     crunchbase: [],
