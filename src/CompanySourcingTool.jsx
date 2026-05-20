@@ -1068,6 +1068,314 @@ export default function CompanySourcingTool() {
     buildRemainingSeconds == null
       ? null
       : `${Math.floor(buildRemainingSeconds / 3600)}h ${Math.floor((buildRemainingSeconds % 3600) / 60)}m remaining`;
+
+  const buildFiltersAllSelected =
+    buildVerticals.length === VERTICALS.length &&
+    buildProducts.length === SOFTWARE_PRODUCT_KEYS.length;
+
+  const selectAllBuildFilters = () => {
+    setBuildVerticals([...VERTICALS]);
+    setBuildProducts([...SOFTWARE_PRODUCT_KEYS]);
+  };
+  // #endregion
+
+  // #region Prospects
+  const [prospectRows, setProspectRows] = useState([]);
+  const [prospectTotal, setProspectTotal] = useState(0);
+  const [prospectLoading, setProspectLoading] = useState(false);
+  const [prospectSelected, setProspectSelected] = useState(new Set());
+  const [prospectEnrichJobId, setProspectEnrichJobId] = useState(null);
+  const [prospectEnrichStatus, setProspectEnrichStatus] = useState(null);
+  const [prospectEnrichStats, setProspectEnrichStats] = useState({ enqueued: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
+  const [prospectEnrichLog, setProspectEnrichLog] = useState("");
+  const [prospectEnrichTopN, setProspectEnrichTopN] = useState(500);
+  const prospectEnrichESRef = useRef(null);
+  const [expansionJobId, setExpansionJobId] = useState(null);
+  const [expansionStatus, setExpansionStatus] = useState(null);
+  const [expansionStats, setExpansionStats] = useState({
+    discovered: 0,
+    skipped: 0,
+    errors: 0,
+    adaptersDone: 0,
+    adaptersTotal: 0,
+  });
+  const [expansionLog, setExpansionLog] = useState("");
+  const [expansionMaxCandidates, setExpansionMaxCandidates] = useState(5000);
+  const expansionESRef = useRef(null);
+  const expansionLastRefreshAtRef = useRef(0);
+
+  const loadProspects = useCallback(async (offset = 0) => {
+    setProspectLoading(true);
+    try {
+      const r = await fetch(`/api/prospects?offset=${offset}&limit=100`);
+      const d = await r.json();
+      if (d.ok) {
+        if (offset === 0) setProspectRows(d.companies || []);
+        else setProspectRows((prev) => [...prev, ...(d.companies || [])]);
+        setProspectTotal(d.total ?? 0);
+      }
+    } catch { /* */ }
+    setProspectLoading(false);
+  }, []);
+
+  const loadProspectCount = useCallback(async () => {
+    try {
+      const r = await fetch("/api/prospects/count");
+      const d = await r.json();
+      if (d.ok) setProspectTotal(d.count ?? 0);
+    } catch { /* */ }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "prospects") loadProspects(0);
+    loadProspectCount();
+  }, [activeTab, loadProspects, loadProspectCount]);
+
+  const loadMoreProspects = () => {
+    loadProspects(prospectRows.length);
+  };
+
+  const toggleProspectSelected = (id) => {
+    setProspectSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllProspectSelected = () => {
+    if (prospectSelected.size === prospectRows.length) {
+      setProspectSelected(new Set());
+    } else {
+      setProspectSelected(new Set(prospectRows.map((r) => r.id)));
+    }
+  };
+
+  const startProspectEnrich = async (ids) => {
+    setProspectEnrichStatus("starting");
+    setProspectEnrichStats({ enqueued: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
+    setProspectEnrichLog("Starting prospect enrichment...");
+    try {
+      const payload = ids ? { ids } : { all: true, maxCandidates: prospectEnrichTopN };
+      const res = await fetch("/api/prospects/enrich", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId, finished, stats: serverStats } = await res.json();
+      setProspectEnrichJobId(jobId);
+      if (serverStats && typeof serverStats === "object") {
+        setProspectEnrichStats((prev) => ({
+          ...prev,
+          enqueued: serverStats.enqueued ?? prev.enqueued,
+          basicEnriched: serverStats.basicEnriched ?? prev.basicEnriched,
+          fullyEnriched: serverStats.fullyEnriched ?? prev.fullyEnriched,
+          classified: serverStats.classified ?? prev.classified,
+          failed: serverStats.failed ?? prev.failed,
+          skipped: serverStats.skipped ?? prev.skipped,
+        }));
+      }
+
+      if (finished) {
+        setProspectEnrichStatus("done");
+        setProspectEnrichLog("Enrichment complete.");
+        loadProspects(0);
+        loadProspectCount();
+        loadUniverseRows();
+        return;
+      }
+
+      setProspectEnrichStatus("running");
+
+      if (prospectEnrichESRef.current) prospectEnrichESRef.current.close();
+      const es = new EventSource(`/api/prospects/enrich/${jobId}/stream`);
+      let streamClosed = false;
+      prospectEnrichESRef.current = es;
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.enqueued !== undefined || msg.basicEnriched !== undefined) {
+            setProspectEnrichStats((prev) => ({
+              ...prev,
+              enqueued: msg.enqueued ?? prev.enqueued,
+              basicEnriched: msg.basicEnriched ?? prev.basicEnriched,
+              fullyEnriched: msg.fullyEnriched ?? prev.fullyEnriched,
+              classified: msg.classified ?? prev.classified,
+              failed: msg.failed ?? prev.failed,
+              skipped: msg.skipped ?? prev.skipped,
+            }));
+          }
+          if (msg.type === "prospect:done") {
+            setProspectEnrichStatus("done");
+            setProspectEnrichLog("Enrichment complete.");
+            streamClosed = true;
+            es.close();
+            prospectEnrichESRef.current = null;
+            loadProspects(0);
+            loadProspectCount();
+            loadUniverseRows();
+          }
+          if (msg.type === "prospect:error") {
+            setProspectEnrichStatus("error");
+            setProspectEnrichLog(msg.message || "Enrichment error");
+            streamClosed = true;
+            es.close();
+            prospectEnrichESRef.current = null;
+          }
+        } catch { /* */ }
+      };
+      es.onerror = () => {
+        if (streamClosed) return;
+        es.close();
+        prospectEnrichESRef.current = null;
+        setProspectEnrichStatus("error");
+        setProspectEnrichLog("Lost enrichment progress stream. Check the server and try again.");
+      };
+    } catch (e) {
+      setProspectEnrichStatus("error");
+      setProspectEnrichLog(e.message || "Failed to start enrichment");
+    }
+  };
+
+  const stopProspectEnrichFn = async () => {
+    if (!prospectEnrichJobId) return;
+    await fetch(`/api/prospects/enrich/${prospectEnrichJobId}/stop`, { method: "POST" });
+    setProspectEnrichStatus("done");
+    if (prospectEnrichESRef.current) {
+      prospectEnrichESRef.current.close();
+      prospectEnrichESRef.current = null;
+    }
+    loadProspects(0);
+    loadProspectCount();
+  };
+
+  const startSourceExpansionFromProspects = async () => {
+    setExpansionStatus("starting");
+    setExpansionStats({
+      discovered: 0,
+      skipped: 0,
+      errors: 0,
+      adaptersDone: 0,
+      adaptersTotal: 0,
+    });
+    setExpansionLog("Starting source expansion...");
+    try {
+      const res = await fetch("/api/source-expansion/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxCandidates: expansionMaxCandidates }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId } = await res.json();
+      if (!jobId) throw new Error("No expansion job id returned");
+      setExpansionJobId(jobId);
+      setExpansionStatus("running");
+
+      if (expansionESRef.current) expansionESRef.current.close();
+      const es = new EventSource(`/api/source-expansion/${jobId}/stream`);
+      expansionESRef.current = es;
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (
+            msg.discovered !== undefined ||
+            msg.skipped !== undefined ||
+            msg.errors !== undefined ||
+            msg.adaptersDone !== undefined
+          ) {
+            setExpansionStats((prev) => ({
+              ...prev,
+              discovered: msg.discovered ?? prev.discovered,
+              skipped: msg.skipped ?? prev.skipped,
+              errors: msg.errors ?? prev.errors,
+              adaptersDone: msg.adaptersDone ?? prev.adaptersDone,
+              adaptersTotal: msg.adaptersTotal ?? prev.adaptersTotal,
+            }));
+          }
+          if (msg.type === "expansion:adapter_start" && msg.adapterId) {
+            setExpansionLog(`Running adapter: ${msg.adapterId}`);
+          } else if (msg.type === "expansion:progress" && msg.adapterId) {
+            setExpansionLog(`Processing ${msg.adapterId}...`);
+          } else if (msg.type === "expansion:error") {
+            setExpansionStatus("error");
+            setExpansionLog(msg.message || "Source expansion failed");
+            es.close();
+            expansionESRef.current = null;
+          } else if (msg.type === "expansion:stopped") {
+            setExpansionStatus("stopped");
+            setExpansionLog("Source expansion stopped.");
+            es.close();
+            expansionESRef.current = null;
+            loadProspects(0);
+            loadProspectCount();
+          } else if (msg.type === "expansion:done") {
+            setExpansionStatus("done");
+            setExpansionLog("Source expansion complete.");
+            es.close();
+            expansionESRef.current = null;
+            loadProspects(0);
+            loadProspectCount();
+          }
+
+          if (msg.type === "expansion:progress") {
+            const now = Date.now();
+            if (now - expansionLastRefreshAtRef.current > 5000) {
+              expansionLastRefreshAtRef.current = now;
+              loadProspectCount();
+            }
+          }
+        } catch { /* */ }
+      };
+      es.onerror = () => {
+        es.close();
+        expansionESRef.current = null;
+      };
+    } catch (e) {
+      setExpansionStatus("error");
+      setExpansionLog(e.message || "Failed to start source expansion");
+    }
+  };
+
+  const stopSourceExpansionFromProspects = async () => {
+    if (!expansionJobId) return;
+    await fetch(`/api/source-expansion/${expansionJobId}/stop`, { method: "POST" });
+    setExpansionStatus("stopped");
+    setExpansionLog("Source expansion stopped.");
+    if (expansionESRef.current) {
+      expansionESRef.current.close();
+      expansionESRef.current = null;
+    }
+    loadProspects(0);
+    loadProspectCount();
+  };
+
+  const promoteSelectedProspects = async () => {
+    const ids = [...prospectSelected];
+    if (!ids.length) return;
+    await fetch("/api/prospects/promote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    setProspectSelected(new Set());
+    loadProspects(0);
+    loadProspectCount();
+  };
+
+  const rejectSelectedProspects = async () => {
+    const ids = [...prospectSelected];
+    if (!ids.length) return;
+    await fetch("/api/prospects/reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    setProspectSelected(new Set());
+    loadProspects(0);
+    loadProspectCount();
+  };
   // #endregion
 
   // #region Excel export
@@ -1238,6 +1546,12 @@ export default function CompanySourcingTool() {
         action: () => setActiveTab("build"),
       },
       {
+        id: "prospects",
+        label: "Go to Prospects",
+        group: "Navigate",
+        action: () => setActiveTab("prospects"),
+      },
+      {
         id: "deleted",
         label: "Go to Deleted",
         group: "Navigate",
@@ -1306,7 +1620,7 @@ export default function CompanySourcingTool() {
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
       />
 
-      <div className="flex min-h-0 min-h-[calc(100vh-57px)] flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 md:px-6">
           <nav className="flex min-w-0">
             {[
@@ -1314,6 +1628,7 @@ export default function CompanySourcingTool() {
               ["saved", `Saved (${savedRows.length})`],
               ["universe", `Universe (${universeTotal})`],
               ["build", "Build Universe"],
+              ["prospects", `Prospects (${prospectTotal})`],
               ["deleted", `Deleted (${rejectedTotal})`],
             ].map(([id, lbl]) => (
               <button
@@ -2280,14 +2595,24 @@ export default function CompanySourcingTool() {
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={startBuild}
-                      disabled={buildProducts.length === 0}
-                      className="rounded-md bg-primary px-6 py-2.5 text-ui font-semibold text-primary-foreground hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      Start Build
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={selectAllBuildFilters}
+                        disabled={buildFiltersAllSelected}
+                        className="rounded-md border border-border px-4 py-2.5 text-data font-medium text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={startBuild}
+                        disabled={buildProducts.length === 0}
+                        className="rounded-md bg-primary px-6 py-2.5 text-ui font-semibold text-primary-foreground hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Start Build
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -2418,6 +2743,325 @@ export default function CompanySourcingTool() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === "prospects" && (
+            <div className="animate-in-fade space-y-5">
+              <div className="rounded-lg border border-border bg-card p-5 shadow-sm space-y-5">
+                <div>
+                  <h2 className="text-ui font-semibold text-foreground">Prospect Queue</h2>
+                  <p className="mt-1 text-data text-muted-foreground">
+                    Raw companies discovered by source expansion crawlers. Enrich prospects to promote them into the Universe.
+                  </p>
+                </div>
+
+                {/* Bulk actions toolbar */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={startSourceExpansionFromProspects}
+                      disabled={expansionStatus === "starting" || expansionStatus === "running"}
+                      className="rounded-md border border-violet-500/40 px-4 py-2 text-data font-semibold text-violet-700 hover:bg-violet-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-violet-300"
+                    >
+                      Run Source Expansion
+                    </button>
+                    <input
+                      type="number"
+                      min={100}
+                      max={200000}
+                      step={100}
+                      value={expansionMaxCandidates}
+                      onChange={(e) => setExpansionMaxCandidates(Math.max(100, parseInt(e.target.value, 10) || 5000))}
+                      className="w-28 rounded-md border border-border bg-card px-2 py-2 text-data text-foreground"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => startProspectEnrich([...prospectSelected])}
+                    disabled={!prospectSelected.size || prospectEnrichStatus === "running" || expansionStatus === "running"}
+                    className="rounded-md bg-primary px-4 py-2 text-data font-semibold text-primary-foreground hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Enrich Selected ({prospectSelected.size})
+                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startProspectEnrich(null)}
+                      disabled={prospectEnrichStatus === "running" || expansionStatus === "running" || prospectTotal === 0}
+                      className="rounded-md border border-primary/40 px-4 py-2 text-data font-semibold text-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Enrich Top
+                    </button>
+                    <input
+                      type="number"
+                      min={10}
+                      max={50000}
+                      step={100}
+                      value={prospectEnrichTopN}
+                      onChange={(e) => setProspectEnrichTopN(Math.max(10, parseInt(e.target.value, 10) || 500))}
+                      className="w-24 rounded-md border border-border bg-card px-2 py-2 text-data text-foreground"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={promoteSelectedProspects}
+                    disabled={!prospectSelected.size}
+                    className="rounded-md border border-emerald-500/40 px-4 py-2 text-data font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-emerald-300"
+                  >
+                    Promote Selected
+                  </button>
+                  <button
+                    type="button"
+                    onClick={rejectSelectedProspects}
+                    disabled={!prospectSelected.size}
+                    className="rounded-md border border-destructive/40 px-4 py-2 text-data font-semibold text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Reject Selected
+                  </button>
+                </div>
+
+                {/* Source expansion progress panel */}
+                {expansionStatus && expansionStatus !== "done" && expansionStatus !== "error" && expansionStatus !== "stopped" && (
+                  <div className="space-y-3 rounded-md border border-border bg-muted/30 p-4">
+                    <div className="flex items-center gap-3">
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/40 bg-violet-500/10 px-3 py-1 text-data font-semibold text-violet-900 dark:text-violet-100">
+                        {expansionStatus === "starting" ? "Starting crawl..." : "Crawling..."}
+                      </span>
+                      {expansionLog && (
+                        <span className="truncate text-data text-muted-foreground">{expansionLog}</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                      {[
+                        ["Discovered", expansionStats.discovered, "text-foreground"],
+                        ["Skipped", expansionStats.skipped, "text-muted-foreground"],
+                        ["Errors", expansionStats.errors, "text-destructive"],
+                        ["Adapters Done", expansionStats.adaptersDone, "text-violet-600 dark:text-violet-400"],
+                        ["Adapters Total", expansionStats.adaptersTotal, "text-foreground"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl} className="rounded-md border border-border bg-card p-3 text-center">
+                          <div className={`text-lg font-bold tabular-nums ${cls}`}>{(val || 0).toLocaleString()}</div>
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{lbl}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {expansionStatus === "running" && (
+                      <button
+                        type="button"
+                        onClick={stopSourceExpansionFromProspects}
+                        className="rounded-md border border-destructive/40 px-4 py-2 text-data font-medium text-destructive hover:bg-destructive/10"
+                      >
+                        Stop Crawl
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Enrichment progress panel */}
+                {prospectEnrichStatus && prospectEnrichStatus !== "done" && prospectEnrichStatus !== "error" && (
+                  <div className="space-y-3 rounded-md border border-border bg-muted/30 p-4">
+                    <div className="flex items-center gap-3">
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-data font-semibold text-emerald-900 dark:text-emerald-100">
+                        {prospectEnrichStatus === "starting" ? "Starting..." : "Enriching..."}
+                      </span>
+                      {prospectEnrichLog && (
+                        <span className="truncate text-data text-muted-foreground">{prospectEnrichLog}</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                      {[
+                        ["Enqueued", prospectEnrichStats.enqueued, "text-foreground"],
+                        ["Basic Enriched", prospectEnrichStats.basicEnriched, "text-sky-600 dark:text-sky-400"],
+                        ["Fully Enriched", prospectEnrichStats.fullyEnriched, "text-emerald-600 dark:text-emerald-400"],
+                        ["Classified", prospectEnrichStats.classified, "text-violet-600 dark:text-violet-400"],
+                        ["Failed", prospectEnrichStats.failed, "text-destructive"],
+                        ["Skipped", prospectEnrichStats.skipped, "text-muted-foreground"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl} className="rounded-md border border-border bg-card p-3 text-center">
+                          <div className={`text-lg font-bold tabular-nums ${cls}`}>{(val || 0).toLocaleString()}</div>
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{lbl}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={stopProspectEnrichFn}
+                      className="rounded-md border border-destructive/40 px-4 py-2 text-data font-medium text-destructive hover:bg-destructive/10"
+                    >
+                      Stop Enrichment
+                    </button>
+                  </div>
+                )}
+
+                {/* Completion state */}
+                {prospectEnrichStatus === "done" && prospectEnrichStats.basicEnriched > 0 && (
+                  <div className="rounded-md border border-border bg-muted/30 p-4 space-y-2">
+                    <p className="text-data font-semibold text-foreground">
+                      {prospectEnrichStats.basicEnriched.toLocaleString()} prospects enriched and promoted to Universe.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { setActiveTab("universe"); }}
+                      className="rounded-md bg-primary px-4 py-2 text-data font-semibold text-primary-foreground hover:opacity-95"
+                    >
+                      Browse Universe
+                    </button>
+                  </div>
+                )}
+
+                {prospectEnrichStatus === "error" && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4">
+                    <p className="text-data text-destructive">{prospectEnrichLog || "Enrichment failed"}</p>
+                  </div>
+                )}
+
+                {expansionStatus === "done" && expansionStats.discovered > 0 && (
+                  <div className="rounded-md border border-border bg-muted/30 p-4 space-y-2">
+                    <p className="text-data font-semibold text-foreground">
+                      {expansionStats.discovered.toLocaleString()} new prospects discovered.
+                    </p>
+                  </div>
+                )}
+
+                {expansionStatus === "error" && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4">
+                    <p className="text-data text-destructive">{expansionLog || "Source expansion failed"}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Prospect list */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-3 px-1">
+                  <label className="flex items-center gap-2 text-data text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={prospectSelected.size > 0 && prospectSelected.size === prospectRows.length}
+                      onChange={toggleAllProspectSelected}
+                      className="rounded border-border"
+                    />
+                    Select all ({prospectRows.length})
+                  </label>
+                  <span className="text-data text-muted-foreground">
+                    {prospectTotal.toLocaleString()} total prospects
+                  </span>
+                </div>
+
+                {prospectRows.map((c) => {
+                  const sourceTags = c.sourceTags || [];
+                  return (
+                    <div
+                      key={c.id}
+                      className={`rounded-lg border p-4 transition-colors ${
+                        prospectSelected.has(c.id)
+                          ? "border-primary/40 bg-primary/5"
+                          : "border-border bg-card hover:bg-muted/30"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked={prospectSelected.has(c.id)}
+                          onChange={() => toggleProspectSelected(c.id)}
+                          className="mt-1 rounded border-border"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-baseline gap-2">
+                            <span className="font-semibold text-foreground">{c.name || c.domain}</span>
+                            <a
+                              href={c.website || `https://${c.domain}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="truncate text-data text-primary hover:underline"
+                            >
+                              {c.domain}
+                            </a>
+                            {typeof c.priority_score === "number" && (
+                              <span className="rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-bold tabular-nums text-muted-foreground">
+                                P{Math.round(c.priority_score)}
+                              </span>
+                            )}
+                          </div>
+                          {c.description && (
+                            <p className="mt-1 text-data leading-relaxed text-muted-foreground">{c.description}</p>
+                          )}
+                          <div className="mt-1.5 flex flex-wrap gap-1.5">
+                            {sourceTags.map((s) => (
+                              <span
+                                key={s}
+                                className="rounded-full border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5 text-[10px] font-medium text-emerald-900 dark:text-emerald-100"
+                              >
+                                {s}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => startProspectEnrich([c.id])}
+                            disabled={prospectEnrichStatus === "running"}
+                            className="rounded-md border border-primary/40 px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-primary/10 disabled:opacity-40"
+                          >
+                            Enrich
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await fetch("/api/prospects/promote", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ ids: [c.id] }),
+                              });
+                              loadProspects(0);
+                              loadProspectCount();
+                            }}
+                            className="rounded-md border border-emerald-500/40 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+                          >
+                            Promote
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await fetch("/api/prospects/reject", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ ids: [c.id] }),
+                              });
+                              loadProspects(0);
+                              loadProspectCount();
+                            }}
+                            className="rounded-md border border-destructive/40 px-2.5 py-1 text-[11px] font-semibold text-destructive hover:bg-destructive/10"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {prospectRows.length < prospectTotal && (
+                  <button
+                    type="button"
+                    onClick={loadMoreProspects}
+                    disabled={prospectLoading}
+                    className="w-full rounded-md border border-border py-2.5 text-data font-medium text-muted-foreground hover:bg-muted/50 disabled:opacity-40"
+                  >
+                    {prospectLoading ? "Loading..." : `Load more (${prospectRows.length} / ${prospectTotal.toLocaleString()})`}
+                  </button>
+                )}
+
+                {!prospectLoading && prospectRows.length === 0 && (
+                  <div className="rounded-lg border border-border bg-muted/20 p-8 text-center">
+                    <p className="text-data text-muted-foreground">
+                      No prospects yet. Run Source Expansion to crawl registries, marketplaces, and directories.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

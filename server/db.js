@@ -61,9 +61,19 @@ export function getDb() {
     addCol("enrichment_attempt_count", "INTEGER DEFAULT 0");
     addCol("error_message", "TEXT");
     addCol("next_retry_at", "TEXT");
+    addCol("pool", "TEXT NOT NULL DEFAULT 'universe'");
 
     db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_priority ON companies(priority_score)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_pool ON companies(pool)`);
+
+    // Migrate unenriched rows (from source expansion) into the prospect pool.
+    // Covers DISCOVERED and BASIC_ENRICHED-but-empty (pre-score rejects).
+    db.prepare(
+      `UPDATE companies SET pool = 'prospect'
+       WHERE pool = 'universe' AND is_saved = 0 AND data = '{}'
+         AND status IN ('DISCOVERED', 'BASIC_ENRICHED')`
+    ).run();
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS build_jobs (
@@ -110,6 +120,19 @@ export function getDb() {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_ce_company ON company_events(company_id);
+
+      CREATE TABLE IF NOT EXISTS expansion_cursors (
+        adapter_id    TEXT NOT NULL,
+        cursor_key    TEXT NOT NULL,
+        cursor_value  TEXT,
+        last_run_at   TEXT,
+        items_discovered INTEGER DEFAULT 0,
+        status        TEXT DEFAULT 'PENDING',
+        metadata      TEXT DEFAULT '{}',
+        PRIMARY KEY (adapter_id, cursor_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ec_adapter ON expansion_cursors(adapter_id);
+      CREATE INDEX IF NOT EXISTS idx_ec_status ON expansion_cursors(status);
     `);
   }
   return db;
@@ -229,11 +252,11 @@ export function setManualClassify(id, { manualMissionCritical, manualVerticallyI
 
 export function listUniverse({ offset = 0, limit = 50, savedOnly = false, rejectedOnly = false }) {
   const d = getDb();
-  let where = "WHERE is_rejected = 0";
+  let where = "WHERE pool = 'universe' AND is_rejected = 0";
   if (rejectedOnly) {
     where = "WHERE is_rejected = 1";
   } else if (savedOnly) {
-    where = "WHERE is_saved = 1 AND is_rejected = 0";
+    where = "WHERE pool = 'universe' AND is_saved = 1 AND is_rejected = 0";
   }
   const rows = d.prepare(`SELECT * FROM companies ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
   const total = d.prepare(`SELECT COUNT(*) as c FROM companies ${where}`).get().c;
@@ -243,7 +266,7 @@ export function listUniverse({ offset = 0, limit = 50, savedOnly = false, reject
 /** Active companies only (for similarity candidate pool). */
 export function listActiveCompanySimilarityStubs() {
   const rows = getDb()
-    .prepare(`SELECT id, domain, name, data FROM companies WHERE is_rejected = 0`)
+    .prepare(`SELECT id, domain, name, data FROM companies WHERE pool = 'universe' AND is_rejected = 0`)
     .all();
   return rows;
 }
@@ -252,7 +275,7 @@ export function listActiveCompanySimilarityStubs() {
 export function iterateActiveUniverseRows() {
   return getDb()
     .prepare(
-      `SELECT * FROM companies WHERE is_rejected = 0
+      `SELECT * FROM companies WHERE pool = 'universe' AND is_rejected = 0
        ORDER BY COALESCE(json_extract(data, '$.score'), json_extract(data, '$.thesisScore'), 0) DESC,
                 updated_at DESC`
     )
@@ -296,7 +319,7 @@ export function updateBuildJobStats(id, stats) {
     .run(JSON.stringify(stats), id);
 }
 
-export function upsertDiscoveredCompany({ domain, name, website, batchId, priorityScore }) {
+export function upsertDiscoveredCompany({ domain, name, website, batchId, priorityScore, pool = "universe" }) {
   const d = getDb();
   const row = d.prepare(
     "SELECT id, status, is_saved, is_rejected FROM companies WHERE domain = ?"
@@ -313,9 +336,9 @@ export function upsertDiscoveredCompany({ domain, name, website, batchId, priori
     return row.id;
   }
   const info = d.prepare(
-    `INSERT INTO companies (domain, name, website, status, discovery_batch_id, last_discovered_at, priority_score, data)
-     VALUES (?, ?, ?, 'DISCOVERED', ?, datetime('now'), ?, '{}')`
-  ).run(domain, name ?? null, website ?? null, batchId, priorityScore ?? null);
+    `INSERT INTO companies (domain, name, website, status, discovery_batch_id, last_discovered_at, priority_score, pool, data)
+     VALUES (?, ?, ?, 'DISCOVERED', ?, datetime('now'), ?, ?, '{}')`
+  ).run(domain, name ?? null, website ?? null, batchId, priorityScore ?? null, pool);
   return Number(info.lastInsertRowid);
 }
 
@@ -438,6 +461,8 @@ export function rowToCompany(row) {
     website: row.website || data.website,
     is_saved: !!row.is_saved,
     is_rejected: !!(row.is_rejected ?? 0),
+    priority_score: row.priority_score ?? data.priority_score ?? null,
+    pool: row.pool ?? "universe",
     manual_mission_critical: row.manual_mission_critical,
     manual_vertically_integrated: row.manual_vertically_integrated,
     manual_proprietary: row.manual_proprietary,
@@ -457,5 +482,97 @@ export function countPendingJobs(batchId) {
      JOIN companies c ON c.id = eq.company_id
      WHERE c.discovery_batch_id = ? AND eq.status IN ('PENDING','RUNNING')`
   ).get(batchId).cnt;
+}
+
+export function countPendingProspectJobs() {
+  return getDb().prepare(
+    `SELECT COUNT(*) as cnt FROM enrichment_queue
+     WHERE status IN ('PENDING','RUNNING')`
+  ).get().cnt;
+}
+// #endregion
+
+// #region Prospect pool
+export function listProspects({ offset = 0, limit = 50, minPriority = 0 } = {}) {
+  const d = getDb();
+  const where = "WHERE pool = 'prospect' AND is_rejected = 0 AND status IN ('DISCOVERED','FAILED') AND COALESCE(priority_score, 0) >= ?";
+  const rows = d.prepare(
+    `SELECT * FROM companies ${where} ORDER BY COALESCE(priority_score, 0) DESC, last_discovered_at DESC LIMIT ? OFFSET ?`
+  ).all(minPriority, limit, offset);
+  const total = d.prepare(`SELECT COUNT(*) as c FROM companies ${where}`).get(minPriority).c;
+  return { rows, total };
+}
+
+export function getSourceTagsForCompanies(ids) {
+  if (!ids.length) return {};
+  const d = getDb();
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = d.prepare(
+    `SELECT company_id, source_tag FROM company_sources WHERE company_id IN (${placeholders})`
+  ).all(...ids);
+  const map = {};
+  for (const r of rows) {
+    if (!map[r.company_id]) map[r.company_id] = [];
+    if (r.source_tag && !map[r.company_id].includes(r.source_tag)) {
+      map[r.company_id].push(r.source_tag);
+    }
+  }
+  return map;
+}
+
+export function countProspects() {
+  return getDb().prepare(
+    `SELECT COUNT(*) as c FROM companies
+     WHERE pool = 'prospect' AND is_rejected = 0 AND status IN ('DISCOVERED','FAILED')`
+  ).get().c;
+}
+
+export function promoteProspects(ids) {
+  const d = getDb();
+  const txn = d.transaction((list) => {
+    const upd = d.prepare(
+      `UPDATE companies SET pool = 'universe', updated_at = datetime('now') WHERE id = ? AND pool = 'prospect'`
+    );
+    let n = 0;
+    for (const id of list) {
+      n += upd.run(id).changes;
+    }
+    return n;
+  });
+  return txn(ids);
+}
+
+export function enqueueProspectEnrichment(ids) {
+  const d = getDb();
+  let enqueued = 0;
+  const txn = d.transaction((list) => {
+    for (const id of list) {
+      const row = d.prepare(
+        "SELECT id, pool, status FROM companies WHERE id = ? AND pool = 'prospect' AND status IN ('DISCOVERED','FAILED')"
+      ).get(id);
+      if (!row) continue;
+      const existing = d.prepare(
+        "SELECT id FROM enrichment_queue WHERE company_id = ? AND job_type = 'ENRICH_A' AND status IN ('PENDING','RUNNING')"
+      ).get(id);
+      if (existing) continue;
+      const priority = d.prepare("SELECT COALESCE(priority_score, 0) as p FROM companies WHERE id = ?").get(id)?.p ?? 0;
+      d.prepare(
+        `INSERT INTO enrichment_queue (company_id, job_type, priority, thesis_version) VALUES (?, 'ENRICH_A', ?, 'v1')`
+      ).run(id, priority);
+      enqueued++;
+    }
+  });
+  txn(ids);
+  if (enqueued > 0) queueSignal.emit("enqueued", { count: enqueued });
+  return enqueued;
+}
+
+export function listTopProspectIds(limit, minPriority = 0) {
+  return getDb().prepare(
+    `SELECT id FROM companies
+     WHERE pool = 'prospect' AND is_rejected = 0 AND status IN ('DISCOVERED','FAILED') AND COALESCE(priority_score, 0) >= ?
+     ORDER BY COALESCE(priority_score, 0) DESC
+     LIMIT ?`
+  ).all(minPriority, limit).map((r) => r.id);
 }
 // #endregion

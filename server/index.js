@@ -28,7 +28,17 @@ import {
   stopBuild,
   getActiveJob,
 } from "./overnightPipeline.js";
-import { getBuildJob, listBuildJobs } from "./db.js";
+import {
+  getBuildJob,
+  listBuildJobs,
+  updateBuildJobStatus,
+  listProspects,
+  countProspects,
+  promoteProspects,
+  getSourceTagsForCompanies,
+} from "./db.js";
+import { runSourceExpansion, getAdapterStatuses, stopSourceExpansion } from "./sourceExpansion/index.js";
+import { startProspectEnrich, stopProspectEnrich, getActiveProspectJob } from "./prospectEnrich.js";
 
 // Undici's fetch() attaches several internal listeners per in-flight request. The search
 // pipeline runs many concurrent fetches (see pipeline.js p-limit); default limit is 10.
@@ -386,6 +396,267 @@ app.get("/api/universe/builds", (_req, res) => {
     return { id: r.id, status: r.status, config, stats, created_at: r.created_at, updated_at: r.updated_at };
   });
   res.json({ ok: true, builds: result });
+});
+
+// ── Prospect Pool API ───────────────────────────────────────────
+
+const prospectJobs = new Map();
+
+app.get("/api/prospects", (req, res) => {
+  try {
+    const offset = parseInt(req.query.offset || "0", 10) || 0;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 5000);
+    const minPriority = parseFloat(req.query.minPriority || "0") || 0;
+    const { rows, total } = listProspects({ offset, limit, minPriority });
+    const ids = rows.map((r) => r.id);
+    const tagMap = getSourceTagsForCompanies(ids);
+    const companies = rows.map((r) => {
+      const c = rowToCompany(r);
+      if (!c.sourceTags?.length && tagMap[r.id]?.length) {
+        c.sourceTags = tagMap[r.id];
+      }
+      return c;
+    });
+    res.json({ ok: true, total, offset, companies });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.get("/api/prospects/count", (_req, res) => {
+  try {
+    res.json({ ok: true, count: countProspects() });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.post("/api/prospects/enrich", async (req, res) => {
+  try {
+    const config = req.body || {};
+    prospectJobs.set("_pending", { subscribers: new Set() });
+
+    const jobRef = { id: null };
+    jobRef.id = startProspectEnrich(config, process.env, (evt) => {
+      const entry = prospectJobs.get(jobRef.id) || prospectJobs.get("_pending");
+      if (!entry) return;
+      for (const fn of entry.subscribers) {
+        try { fn(evt); } catch { /* */ }
+      }
+    });
+    const jobId = jobRef.id;
+
+    const pending = prospectJobs.get("_pending");
+    prospectJobs.delete("_pending");
+    prospectJobs.set(jobId, { subscribers: pending?.subscribers || new Set() });
+
+    const active = getActiveProspectJob(jobId);
+    if (active) {
+      active.subscribers = prospectJobs.get(jobId).subscribers;
+    }
+
+    const buildJob = getBuildJob(jobId);
+    const finished = !!active?.finished || ["DONE", "STOPPED", "ERROR"].includes(buildJob?.status);
+    let stats = active?.stats || {};
+    if (!active?.stats && buildJob?.stats) {
+      try { stats = JSON.parse(buildJob.stats || "{}"); } catch { /* */ }
+    }
+
+    res.json({ ok: true, jobId, finished, stats });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.get("/api/prospects/enrich/:jobId", (req, res) => {
+  const job = getBuildJob(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ ok: false, message: "Prospect enrich job not found" });
+    return;
+  }
+  let stats = {};
+  try { stats = JSON.parse(job.stats || "{}"); } catch { /* */ }
+  let config = {};
+  try { config = JSON.parse(job.config || "{}"); } catch { /* */ }
+  res.json({ ok: true, id: job.id, status: job.status, config, stats, created_at: job.created_at, updated_at: job.updated_at });
+});
+
+app.get("/api/prospects/enrich/:jobId/stream", (req, res) => {
+  const jobId = req.params.jobId;
+  let entry = prospectJobs.get(jobId);
+  if (!entry) {
+    const active = getActiveProspectJob(jobId);
+    if (!active) { res.status(404).end(); return; }
+    entry = { subscribers: active.subscribers || new Set() };
+    prospectJobs.set(jobId, entry);
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (evt) => { res.write(`data: ${JSON.stringify(evt)}\n\n`); };
+  entry.subscribers.add(send);
+  req.on("close", () => { entry.subscribers.delete(send); });
+});
+
+app.post("/api/prospects/enrich/:jobId/stop", (req, res) => {
+  stopProspectEnrich(req.params.jobId);
+  res.json({ ok: true, status: "STOPPED" });
+});
+
+app.post("/api/prospects/promote", (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x) => parseInt(String(x), 10)).filter(Number.isFinite) : [];
+    if (!ids.length) {
+      res.status(400).json({ ok: false, message: "Provide a non-empty ids array" });
+      return;
+    }
+    const promoted = promoteProspects(ids);
+    res.json({ ok: true, promoted });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.post("/api/prospects/reject", (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x) => parseInt(String(x), 10)).filter(Number.isFinite) : [];
+    if (!ids.length) {
+      res.status(400).json({ ok: false, message: "Provide a non-empty ids array" });
+      return;
+    }
+    const changed = bulkRejectIds(ids);
+    res.json({ ok: true, rejectedCount: changed });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+// ── Source Expansion API ────────────────────────────────────────
+
+const expansionJobs = new Map();
+
+app.get("/api/source-expansion/adapters", (_req, res) => {
+  try {
+    const adapters = getAdapterStatuses();
+    res.json({ ok: true, adapters });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.post("/api/source-expansion/run", async (req, res) => {
+  try {
+    const config = req.body || {};
+    const pendingKey = `_pending_${randomUUID()}`;
+    expansionJobs.set(pendingKey, { subscribers: new Set() });
+
+    let startedJobId = null;
+    const bindSubscribersToJob = (jobId) => {
+      if (!jobId || expansionJobs.has(jobId)) return;
+      const pending = expansionJobs.get(pendingKey);
+      expansionJobs.delete(pendingKey);
+      expansionJobs.set(jobId, {
+        subscribers: pending?.subscribers || new Set(),
+      });
+    };
+
+    let resolveStarted;
+    let rejectStarted;
+    const started = new Promise((resolve, reject) => {
+      resolveStarted = resolve;
+      rejectStarted = reject;
+    });
+
+    runSourceExpansion(config, process.env, (evt) => {
+      if (evt?.type === "expansion:started" && evt.jobId) {
+        startedJobId = evt.jobId;
+        bindSubscribersToJob(startedJobId);
+        resolveStarted?.(startedJobId);
+      }
+
+      const entry = expansionJobs.get(startedJobId) || expansionJobs.get(pendingKey);
+      if (!entry) return;
+      for (const fn of entry.subscribers) {
+        try { fn(evt); } catch { /* */ }
+      }
+    })
+      .then((jobId) => {
+        if (!startedJobId) {
+          startedJobId = jobId;
+          bindSubscribersToJob(startedJobId);
+          resolveStarted?.(startedJobId);
+        }
+      })
+      .catch((e) => {
+        if (!startedJobId) {
+          rejectStarted?.(e);
+          expansionJobs.delete(pendingKey);
+        } else {
+          const entry = expansionJobs.get(startedJobId);
+          if (entry) {
+            for (const fn of entry.subscribers) {
+              try { fn({ type: "expansion:error", jobId: startedJobId, message: e.message || String(e) }); } catch { /* */ }
+            }
+          }
+        }
+      });
+
+    const jobId = await started;
+    res.json({ ok: true, jobId });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.get("/api/source-expansion/:jobId", (req, res) => {
+  const job = getBuildJob(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ ok: false, message: "Expansion job not found" });
+    return;
+  }
+  let stats = {};
+  try { stats = JSON.parse(job.stats || "{}"); } catch { /* */ }
+  let config = {};
+  try { config = JSON.parse(job.config || "{}"); } catch { /* */ }
+  res.json({ ok: true, id: job.id, status: job.status, config, stats, created_at: job.created_at, updated_at: job.updated_at });
+});
+
+app.get("/api/source-expansion/:jobId/stream", (req, res) => {
+  const jobId = req.params.jobId;
+  const entry = expansionJobs.get(jobId);
+  if (!entry) {
+    res.status(404).end();
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (evt) => {
+    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+  };
+  entry.subscribers.add(send);
+  req.on("close", () => {
+    entry.subscribers.delete(send);
+  });
+});
+
+app.post("/api/source-expansion/:jobId/stop", (req, res) => {
+  const jobId = req.params.jobId;
+  const stopped = stopSourceExpansion(jobId);
+  updateBuildJobStatus(jobId, "STOPPED");
+  const entry = expansionJobs.get(jobId);
+  if (entry) {
+    for (const fn of entry.subscribers) {
+      try { fn({ type: "expansion:stopped", jobId, stopped }); } catch { /* */ }
+    }
+  }
+  res.json({ ok: true, status: "STOPPED" });
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);

@@ -11,8 +11,9 @@
     "client": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test ./server/__tests__/scrapingSignals.test.js ./server/__tests__/visiblePageText.test.js ./server/__tests__/companySimilarity.test.js ./server/__tests__/productFit.test.js ./server/__tests__/discoverCompanyFilter.test.js ./server/__tests__/ownershipClassify.test.js ./server/__tests__/publicCompanySignals.test.js ./server/__tests__/candidateDiscoveryFilters.test.js",
-    "free-discovery": "node scripts/free-discovery.mjs"
+    "test": "node --test ./server/__tests__/scrapingSignals.test.js ./server/__tests__/visiblePageText.test.js ./server/__tests__/companySimilarity.test.js ./server/__tests__/productFit.test.js ./server/__tests__/discoverCompanyFilter.test.js ./server/__tests__/ownershipClassify.test.js ./server/__tests__/publicCompanySignals.test.js ./server/__tests__/candidateDiscoveryFilters.test.js ./server/__tests__/sourceExpansion.test.js",
+    "free-discovery": "node scripts/free-discovery.mjs",
+    "source-expansion": "node scripts/source-expansion.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.1.46",

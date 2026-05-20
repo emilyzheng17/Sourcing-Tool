@@ -54,6 +54,7 @@ export function startEnrichmentWorker(jobId, config, env, emit, onDeadline) {
           completeEnrichmentJob(job.id);
           updateCompanyStatus(companyId, "BASIC_ENRICHED", {
             last_enriched_at: new Date().toISOString(),
+            is_rejected: 1,
           });
           insertCompanyEvent(companyId, "BASIC_ENRICHED", { skipped: true, reason: "pre-score reject" });
         })();
@@ -85,6 +86,12 @@ export function startEnrichmentWorker(jobId, config, env, emit, onDeadline) {
           last_enriched_at: new Date().toISOString(),
           priority_score: stageA.cheapScore,
         });
+
+        if (stageA.cheapScore >= stageBThreshold) {
+          getDb().prepare(
+            "UPDATE companies SET pool = 'universe' WHERE id = ? AND pool = 'prospect'"
+          ).run(companyId);
+        }
 
         completeEnrichmentJob(job.id);
         insertCompanyEvent(companyId, "BASIC_ENRICHED", { cheapScore: stageA.cheapScore });
@@ -144,6 +151,10 @@ export function startEnrichmentWorker(jobId, config, env, emit, onDeadline) {
         updateCompanyStatus(companyId, "FULLY_ENRICHED", {
           last_enriched_at: new Date().toISOString(),
         });
+
+        getDb().prepare(
+          "UPDATE companies SET pool = 'universe' WHERE id = ? AND pool = 'prospect'"
+        ).run(companyId);
 
         completeEnrichmentJob(job.id);
         insertCompanyEvent(companyId, "FULLY_ENRICHED", { domain: enriched.domain });
