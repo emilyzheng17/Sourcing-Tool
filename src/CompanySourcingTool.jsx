@@ -38,6 +38,12 @@ const SOFTWARE_PRODUCTS = {
 
 const SOFTWARE_PRODUCT_KEYS = Object.keys(SOFTWARE_PRODUCTS);
 
+const PUBLIC_EXCLUSION_REASON = "public_listing";
+
+function isPublicAutoExcluded(c) {
+  return c?.exclusionReason === PUBLIC_EXCLUSION_REASON;
+}
+
 const OWNERSHIP_TYPES = [
   "Any Ownership",
   "Founder Owned",
@@ -458,6 +464,7 @@ export default function CompanySourcingTool() {
     setUniverseFilterDrawerOpen(false);
   }, [universeCriteriaForPredicate, fetchUniverseFirstPage]);
 
+
   const loadMoreUniverse = useCallback(() => {
     const offset = universeRows.length;
     const criteria = { ...universeAppliedCriteria, strictVerticalFit, textQuery: "" };
@@ -598,6 +605,10 @@ export default function CompanySourcingTool() {
         body: JSON.stringify({ rejected }),
       });
       const updated = await r.json();
+      if (!r.ok) {
+        window.alert(updated?.message || `Could not update company (HTTP ${r.status}).`);
+        return;
+      }
       setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
       if (rejected) {
         setExpandedCompany((e) => (e === id ? null : e));
@@ -679,8 +690,20 @@ export default function CompanySourcingTool() {
 
   const restoreSelectedFromDeleted = async () => {
     const ids = [...new Set(selectedDeletedAnchorIds.map((x) => Number(x)).filter(Number.isFinite))];
-    if (!ids.length) return;
-    const n = ids.length;
+    const restorableIds = ids.filter((id) => {
+      const row = rejectedRows.find((c) => c.id === id);
+      return !row || !isPublicAutoExcluded(row);
+    });
+    if (!restorableIds.length) {
+      window.alert("Selected companies were auto-excluded as publicly listed and cannot be restored.");
+      return;
+    }
+    if (restorableIds.length < ids.length) {
+      window.alert(
+        `${ids.length - restorableIds.length} publicly listed exclusion(s) skipped; restoring ${restorableIds.length} other(s).`
+      );
+    }
+    const n = restorableIds.length;
     if (
       !window.confirm(
         `Restore ${n} selected ${n === 1 ? "company" : "companies"} to the active universe?`
@@ -693,7 +716,7 @@ export default function CompanySourcingTool() {
       const r = await fetch("/api/companies/bulk-restore", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ ids: restorableIds }),
       });
       let d = {};
       try {
@@ -710,7 +733,7 @@ export default function CompanySourcingTool() {
         window.alert(d.message || "Restore was not applied.");
         return;
       }
-      const restored = new Set(ids);
+      const restored = new Set(restorableIds);
       setSelectedDeletedAnchorIds([]);
       setSearchResults((prev) =>
         prev.map((c) => (restored.has(c.id) ? { ...c, is_rejected: false } : c))
@@ -779,6 +802,7 @@ export default function CompanySourcingTool() {
 
   const clearAllUniverse = () => {
     setUniverseSelectedVerticals([]);
+    setUniverseSelectedProducts([]);
     setUniverseOwnershipFilter("Any Ownership");
     setUniverseCompanyTypeFilter("Any Type");
     setUniverseRevenueFilter("Any Revenue");
@@ -789,15 +813,21 @@ export default function CompanySourcingTool() {
     setUniverseThesisRequireProprietary(false);
     setUniverseThesisRequireFounderVintage(false);
     setUniverseMinOwnershipConfidence(0);
-    setUniverseAllowedCountryCodes([]);
+    setUniverseAllowedCountryCodes([...DEFAULT_ALLOWED_COUNTRY_CODES]);
   };
+
+  const clearUniverseFiltersAndReload = useCallback(() => {
+    clearAllUniverse();
+    const next = defaultUniverseCriteria();
+    setUniverseAppliedCriteria(next);
+    fetchUniverseFirstPage(undefined, next);
+  }, [fetchUniverseFirstPage]);
 
   const applyIdealProfile = () => {
     setFoundedFilter("Before 2017 (ideal)");
     setSizeFilter("15-100 (ideal)");
     setRevenueFilter("$2M-$10M (ideal)");
     setThesisRequireProprietary(true);
-    setThesisRequireMissionCritical(true);
     setMinOwnershipConfidence(0.5);
   };
 
@@ -815,7 +845,6 @@ export default function CompanySourcingTool() {
     setUniverseSizeFilter("15-100 (ideal)");
     setUniverseRevenueFilter("$2M-$10M (ideal)");
     setUniverseThesisRequireProprietary(true);
-    setUniverseThesisRequireMissionCritical(true);
     setUniverseMinOwnershipConfidence(0.5);
   };
 
@@ -1974,6 +2003,13 @@ export default function CompanySourcingTool() {
                 >
                   Refresh
                 </button>
+                <button
+                  type="button"
+                  onClick={clearUniverseFiltersAndReload}
+                  className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
+                >
+                  Clear filters
+                </button>
                 {universeRows.length < universeTotal && (
                   <button
                     type="button"
@@ -2229,6 +2265,29 @@ export default function CompanySourcingTool() {
                         Use Ollama classifier (local LLM)
                       </label>
                     )}
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBuildVerticals([...VERTICALS]);
+                          setBuildProducts([...SOFTWARE_PRODUCT_KEYS]);
+                        }}
+                        className="rounded-md border border-border px-3 py-1.5 text-data text-foreground hover:bg-muted/50"
+                      >
+                        Select all filters
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBuildVerticals([]);
+                          setBuildProducts([]);
+                        }}
+                        className="rounded-md border border-border px-3 py-1.5 text-data text-muted-foreground hover:bg-muted/50"
+                      >
+                        Clear filters
+                      </button>
+                    </div>
 
                     {/* Verticals */}
                     <div className="space-y-1">
@@ -2521,6 +2580,11 @@ export default function CompanySourcingTool() {
                             {ownLabel && (
                               <span className={`rounded border px-2 py-0.5 text-data ${ownCls}`}>{ownLabel}</span>
                             )}
+                            {isPublicAutoExcluded(c) && (
+                              <span className="rounded border border-border bg-muted px-2 py-0.5 text-data text-muted-foreground">
+                                Auto-excluded (public listing)
+                              </span>
+                            )}
                             <span className="truncate text-data text-muted-foreground">{c.domain}</span>
                           </div>
                           <div className="flex flex-wrap gap-2">
@@ -2534,13 +2598,15 @@ export default function CompanySourcingTool() {
                                 Site
                               </a>
                             )}
-                            <button
-                              type="button"
-                              onClick={() => setCompanyRejected(c.id, false)}
-                              className="rounded-md border border-border px-3 py-1.5 text-data font-medium text-primary hover:bg-muted"
-                            >
-                              Restore
-                            </button>
+                            {!isPublicAutoExcluded(c) && (
+                              <button
+                                type="button"
+                                onClick={() => setCompanyRejected(c.id, false)}
+                                className="rounded-md border border-border px-3 py-1.5 text-data font-medium text-primary hover:bg-muted"
+                              >
+                                Restore
+                              </button>
+                            )}
                           </div>
                         </div>
                         <p className="mt-2 text-data text-muted-foreground">
@@ -2646,8 +2712,8 @@ export default function CompanySourcingTool() {
           geoHelpText="Discover shows companies whose resolved headquarters country is in your selection. Leave all regions unchecked for worldwide."
           verticals={VERTICALS}
           selectedVerticals={selectedVerticals}
+          setSelectedVerticals={setSelectedVerticals}
           onToggleVertical={toggleVertical}
-          onClearVerticals={() => setSelectedVerticals([])}
           softwareProducts={SOFTWARE_PRODUCTS}
           softwareProductKeys={SOFTWARE_PRODUCT_KEYS}
           selectedProducts={selectedProducts}
@@ -2697,8 +2763,8 @@ export default function CompanySourcingTool() {
           geoHelpText="Universe list uses the same country allowlist logic. Leave all regions unchecked for worldwide. Strict vertical fit follows Settings."
           verticals={VERTICALS}
           selectedVerticals={universeSelectedVerticals}
+          setSelectedVerticals={setUniverseSelectedVerticals}
           onToggleVertical={toggleUniverseVertical}
-          onClearVerticals={() => setUniverseSelectedVerticals([])}
           softwareProducts={SOFTWARE_PRODUCTS}
           softwareProductKeys={SOFTWARE_PRODUCT_KEYS}
           selectedProducts={universeSelectedProducts}
@@ -2795,7 +2861,39 @@ export default function CompanySourcingTool() {
           <div>Apollo: {apiStatus.apollo ? "on" : "off"}</div>
           <div>Crunchbase: {apiStatus.crunchbase ? "on" : "off"}</div>
           <div>Tavily: {apiStatus.tavily ? "on" : "off"}</div>
-          <div>{apiStatus.highRiskExports ? "High-risk CSV/JSON ingest: ready" : "High-risk ingest: off"}</div>
+          <div className="border-t border-border pt-2">
+            <div className="font-sans font-medium text-foreground">LinkedIn export (offline)</div>
+            {apiStatus.linkedInExport?.ready ? (
+              <div className="mt-1 text-emerald-700 dark:text-emerald-400">Ready — ingests on search/build</div>
+            ) : (
+              <ul className="mt-1 list-inside list-disc space-y-0.5">
+                {!apiStatus.linkedInExport?.enabled && (
+                  <li>
+                    Set <code className="text-data">ENABLE_HIGH_TOS_SOURCES=1</code> in <code className="text-data">.env</code>
+                  </li>
+                )}
+                {apiStatus.linkedInExport?.enabled && !apiStatus.linkedInExport?.path && (
+                  <li>
+                    Set <code className="text-data">LINKEDIN_EXPORT_PATH</code> to your CSV or JSON file
+                  </li>
+                )}
+                {apiStatus.linkedInExport?.enabled && apiStatus.linkedInExport?.path && !apiStatus.linkedInExport?.fileExists && (
+                  <li>
+                    File not found: <code className="break-all text-data">{apiStatus.linkedInExport.path}</code> (copy{" "}
+                    <code className="text-data">linkedin-export.example.json</code>)
+                  </li>
+                )}
+              </ul>
+            )}
+            {apiStatus.linkedInExport?.path && (
+              <div className="mt-1 break-all opacity-80">
+                Path: {apiStatus.linkedInExport.path}
+              </div>
+            )}
+            <p className="mt-1 font-sans text-[11px] leading-snug opacity-80">
+              User-provided export only — no live LinkedIn scraping.
+            </p>
+          </div>
           <div>OpenAI: {apiStatus.openai ? "on" : "off"}</div>
           <div>Anthropic: {apiStatus.anthropic ? "on" : "off"}</div>
           <div>Gemini: {apiStatus.gemini ? "on" : "off"}</div>

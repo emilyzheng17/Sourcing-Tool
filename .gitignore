@@ -4,4 +4,6 @@ universe.db
 universe.db-shm
 universe.db-wal
 .env
+linkedin-export.json
+linkedin-export.csv
 *.log

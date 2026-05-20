@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { cheapPreScore } from "../lib/cheapPreScore.js";
 import {
   hasAgencyConsultancyNoise,
   hasPublicListingSignals,
+  isPublicListingCandidate,
   shouldFastFailEnrichment,
 } from "../lib/publicCompanySignals.js";
 
@@ -64,4 +66,26 @@ test("shouldFastFailEnrichment: combines public + agency", () => {
   assert.ok(shouldFastFailEnrichment(longPublic));
   const longAgency = "x".repeat(60) + " award-winning marketing agency for global brands";
   assert.ok(shouldFastFailEnrichment(longAgency));
+});
+
+test("isPublicListingCandidate: title-only nasdaq mention", () => {
+  assert.ok(
+    isPublicListingCandidate({
+      homepageText: "x".repeat(90),
+      title: "Acme Corp — Listed on NASDAQ",
+      metaDescription: "enterprise software",
+    }),
+  );
+});
+
+test("cheapPreScore: public_listing fastFail from meta only", () => {
+  const r = cheapPreScore({
+    homepageText: "a".repeat(90),
+    title: "Vendor",
+    metaDescription: "publicly traded on the nyse with investor relations",
+    candidate: { sourceTags: [] },
+    brief: {},
+  });
+  assert.equal(r.fastFailKind, "public_listing");
+  assert.ok(r.reasons.includes("public_listing"));
 });

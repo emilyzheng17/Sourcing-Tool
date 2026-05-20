@@ -1,9 +1,10 @@
 /**
  * Rule-based ownership_class aligned with Discover UI (no LLM).
  *
- * Canonical classes: "Founder Owned" | "Founder Operated" | "VC Backed" | "PE Owned" | "Unknown"
+ * Canonical classes: "Publicly Traded" | "Founder Owned" | "Founder Operated" | "VC Backed" | "PE Owned" | "Unknown"
  *
  * Priority (highest → lowest):
+ *   0. Publicly Traded — exchange / IR / SEC listing signals
  *   1. PE Owned        — any PE/LBO/acquisition-by-PE signal
  *   2. VC Backed       — Series A-E, seed, venture-backed, funding round signals
  *   3. Founder Operated — founder is actively the CEO/operator
@@ -243,7 +244,11 @@ function collectArchaeologySignals(enriched, corpus) {
 export function inferOwnershipClass(enriched) {
   const corpus = buildCorpus(enriched);
 
-  // 1. PE Owned — highest priority; PE transactions supersede founder/VC classification
+  if (hasPublicListingSignals(corpus)) {
+    return { ownership_class: "Publicly Traded", ownership_confidence: 0.88 };
+  }
+
+  // 1. PE Owned — PE transactions supersede founder/VC classification
   if (hasPeSignals(enriched, corpus)) {
     const confidence = enriched.rawMetadata?.peFirm ? 0.85 : 0.74;
     return { ownership_class: "PE Owned", ownership_confidence: confidence };

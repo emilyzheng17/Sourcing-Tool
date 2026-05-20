@@ -28,6 +28,19 @@ test("likelyPeBacked: corpus private equity phrase", () => {
   assert.ok(likelyPeBacked({}, null, "the company was acquired in a private equity transaction"));
 });
 
+// ── inferOwnershipClass: Publicly Traded ────────────────────────────────────
+
+test("inferOwnershipClass: nasdaq copy → Publicly Traded", () => {
+  const r = inferOwnershipClass({
+    founderStillOperating: false,
+    acquisitionHistory: [],
+    homepageTextSample:
+      "enterprise software. listed on the nasdaq. investor relations and stock information for shareholders.",
+  });
+  assert.equal(r.ownership_class, "Publicly Traded");
+  assert.ok(r.ownership_confidence >= 0.85);
+});
+
 // ── inferOwnershipClass: PE Owned ───────────────────────────────────────────
 
 test("inferOwnershipClass: peFirm → PE Owned", () => {

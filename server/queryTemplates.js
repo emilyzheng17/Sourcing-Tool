@@ -17,6 +17,9 @@ export function buildSearchQueries(brief) {
     queries.push(`site:capterra.com ${v} ${productSlug}`);
     queries.push(`site:trustradius.com ${v} ${productSlug}`);
     queries.push(`site:getapp.com ${v} ${productSlug}`);
+    queries.push(`site:softwareadvice.com ${v} ${productSlug}`);
+    queries.push(`site:sourceforge.net ${v} ${productSlug}`);
+    queries.push(`site:saashub.com ${v} ${productSlug}`);
     queries.push(`"${v}" "private equity" software acquisition`);
     queries.push(`"${v}" bootstrapped software company`);
     queries.push(`"${v}" founder led enterprise software`);

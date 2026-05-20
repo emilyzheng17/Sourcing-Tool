@@ -11,6 +11,27 @@ export function normalizeDomain(input) {
   }
 }
 
+/** Host fragments for review/directory listing pages (not vendor homepages). */
+export const DIRECTORY_LISTING_HOST_MARKERS = [
+  "g2.com",
+  "capterra.com",
+  "getapp.com",
+  "softwareadvice.com",
+  "trustradius.com",
+  "sourceforge.net",
+  "slashdot.org",
+  "saashub.com",
+  "alternativeto.net",
+  "crozdesk.com",
+  "financesonline.com",
+];
+
+export function isDirectoryListingHost(domain) {
+  if (!domain) return false;
+  const d = domain.toLowerCase();
+  return DIRECTORY_LISTING_HOST_MARKERS.some((m) => d.includes(m));
+}
+
 export function isLikelyCompanyDomain(domain) {
   if (!domain || domain.length < 4) return false;
   const blocked = new Set([
@@ -25,6 +46,22 @@ export function isLikelyCompanyDomain(domain) {
     "capterra.com",
     "getapp.com",
     "softwareadvice.com",
+    "sourceforge.net",
+    "slashdot.org",
+    "saashub.com",
+    "alternativeto.net",
+    "trustradius.com",
+    "crozdesk.com",
+    "financesonline.com",
+    "producthunt.com",
+    "stackshare.io",
+    "appsource.microsoft.com",
+    "appexchange.salesforce.com",
+    "ecosystem.hubspot.com",
+    "apps.intuit.com",
+    "apps.xero.com",
+    "marketplace.procore.com",
+    "suiteapp.com",
     "gartner.com",
     "wikipedia.org",
     "github.com",

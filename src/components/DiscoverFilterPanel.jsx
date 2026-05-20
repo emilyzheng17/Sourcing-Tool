@@ -15,8 +15,8 @@ export function DiscoverFilterPanel({
   geoHelpText,
   verticals,
   selectedVerticals,
+  setSelectedVerticals,
   onToggleVertical,
-  onClearVerticals,
   softwareProducts,
   softwareProductKeys,
   selectedProducts,
@@ -79,6 +79,22 @@ export function DiscoverFilterPanel({
 
       {sidebarSection === "vertical" && (
         <div className="space-y-3 animate-in-fade">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedVerticals([...verticals])}
+              className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedVerticals([])}
+              className="rounded-md border border-border px-3 py-1.5 text-data hover:bg-muted"
+            >
+              Clear
+            </button>
+          </div>
           <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Industry verticals</p>
           <div className="flex flex-col gap-2">
             {verticals.map((v) => (
@@ -99,15 +115,6 @@ export function DiscoverFilterPanel({
               </button>
             ))}
           </div>
-          {selectedVerticals.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearVerticals}
-              className="w-full rounded-md border border-border py-2 text-data text-muted-foreground hover:bg-muted"
-            >
-              Clear ({selectedVerticals.length})
-            </button>
-          )}
         </div>
       )}
 

@@ -5,7 +5,7 @@
  * OpenCorporates, Brave acquisition queries, LLM classification).
  */
 
-import { shouldFastFailEnrichment } from "./publicCompanySignals.js";
+import { classifyHomepageSignals } from "./publicCompanySignals.js";
 
 const SOFTWARE_QUICK = [
   "saas",
@@ -69,8 +69,26 @@ export function cheapPreScore({ homepageText, title, metaDescription, candidate,
   const metaLower = (metaDescription || "").toLowerCase();
   const combined = corpus + " " + titleLower + " " + metaLower;
 
-  if (shouldFastFailEnrichment(corpus)) {
-    return { cheapScore: 0, fastFail: true, reasons: ["public-company or agency/consultancy signals"] };
+  const signals = classifyHomepageSignals({
+    homepageText: corpus,
+    title: titleLower,
+    metaDescription: metaLower,
+  });
+  if (signals.isPublic) {
+    return {
+      cheapScore: 0,
+      fastFail: true,
+      fastFailKind: "public_listing",
+      reasons: ["public_listing"],
+    };
+  }
+  if (signals.isAgency) {
+    return {
+      cheapScore: 0,
+      fastFail: true,
+      fastFailKind: "agency",
+      reasons: ["agency/consultancy signals"],
+    };
   }
 
   for (const kw of NEGATIVE_SIGNALS) {

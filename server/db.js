@@ -3,6 +3,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { applyManualOverrides } from "./score.js";
 import queueSignal from "./lib/queueSignal.js";
+import {
+  PUBLIC_EXCLUSION_REASON,
+  isPublicExclusionData,
+  canRestoreRejectedRow,
+  buildCorpusFromCompanyData,
+} from "./lib/publicExclusion.js";
+import { isPublicListingCandidate } from "./lib/publicCompanySignals.js";
+
+export { PUBLIC_EXCLUSION_REASON };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.join(__dirname, "..", "universe.db");
@@ -120,12 +129,20 @@ export function getDb() {
 export function upsertCompany({ domain, name, website, data, isSaved }) {
   const d = getDb();
   const row = d.prepare(
-    "SELECT id, is_saved, is_rejected, manual_mission_critical, manual_vertically_integrated, manual_proprietary FROM companies WHERE domain = ?"
+    "SELECT id, is_saved, is_rejected, data, manual_mission_critical, manual_vertically_integrated, manual_proprietary FROM companies WHERE domain = ?"
   ).get(domain);
   const payload = JSON.stringify(data ?? {});
   if (row) {
     const keepSaved = row.is_saved || isSaved ? 1 : 0;
-    const keepRejected = row.is_rejected ? 1 : 0;
+    let keepRejected = row.is_rejected ? 1 : 0;
+    if (keepRejected === 0) {
+      try {
+        const existing = JSON.parse(row.data || "{}");
+        if (isPublicExclusionData(existing) || isPublicExclusionData(data)) keepRejected = 1;
+      } catch {
+        if (isPublicExclusionData(data)) keepRejected = 1;
+      }
+    }
     d.prepare(
       `UPDATE companies SET name = ?, website = ?, data = ?, is_saved = ?, is_rejected = ?, updated_at = datetime('now') WHERE domain = ?`
     ).run(name ?? null, website ?? null, payload, keepSaved, keepRejected, domain);
@@ -145,6 +162,78 @@ export function getCompanyByDomain(domain) {
   return getDb().prepare("SELECT * FROM companies WHERE domain = ?").get(domain);
 }
 
+/**
+ * @param {object} opts
+ * @param {string} [opts.domain]
+ * @param {number} [opts.id]
+ * @param {string} [opts.source]
+ * @param {object} [opts.extraData]
+ * @returns {{ id: number, domain: string } | null}
+ */
+export function markPublicCompanyExcluded({ domain, id, source = "unknown", extraData = {} }) {
+  const d = getDb();
+  const row =
+    (id != null ? getCompanyById(id) : null) ||
+    (domain ? getCompanyByDomain(domain) : null);
+
+  const mergedBase = {
+    ...extraData,
+    exclusionReason: PUBLIC_EXCLUSION_REASON,
+    excludedAt: extraData.excludedAt || new Date().toISOString(),
+    exclusionSource: source,
+    ownership_class: extraData.ownership_class || "Publicly Traded",
+  };
+
+  if (!row) {
+    if (!domain) return null;
+    const payload = JSON.stringify({ ...mergedBase, domain, website: extraData.website || `https://${domain}` });
+    const info = d
+      .prepare(
+        `INSERT INTO companies (domain, name, website, data, is_saved, is_rejected)
+         VALUES (?, ?, ?, ?, 0, 1)`
+      )
+      .run(domain, extraData.name ?? null, extraData.website ?? `https://${domain}`, payload);
+    return { id: Number(info.lastInsertRowid), domain };
+  }
+
+  let data = {};
+  try {
+    data = JSON.parse(row.data || "{}");
+  } catch {
+    /* ignore */
+  }
+
+  const merged = {
+    ...data,
+    ...mergedBase,
+    excludedAt: data.excludedAt || mergedBase.excludedAt,
+    ownership_class: mergedBase.ownership_class || data.ownership_class || "Publicly Traded",
+  };
+
+  d.prepare(
+    `UPDATE companies SET
+       is_rejected = 1,
+       is_saved = 0,
+       data = ?,
+       updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(JSON.stringify(merged), row.id);
+
+  return { id: row.id, domain: row.domain };
+}
+
+/** @returns {Set<string>} */
+export function listPublicExcludedDomains() {
+  const rows = getDb()
+    .prepare(
+      `SELECT domain FROM companies
+       WHERE is_rejected = 1
+         AND json_extract(data, '$.exclusionReason') = ?`
+    )
+    .all(PUBLIC_EXCLUSION_REASON);
+  return new Set(rows.map((r) => r.domain).filter(Boolean));
+}
+
 export function getFreshCompanyByDomain(domain, ttlDays) {
   return getDb()
     .prepare(
@@ -159,15 +248,31 @@ export function setSaved(id, saved) {
   getDb().prepare("UPDATE companies SET is_saved = ?, updated_at = datetime('now') WHERE id = ?").run(saved ? 1 : 0, id);
 }
 
-export function setRejected(id, rejected) {
+/**
+ * @param {number} id
+ * @param {boolean} rejected
+ * @param {{ force?: boolean }} [opts]
+ * @returns {{ ok: boolean, refused?: boolean, message?: string }}
+ */
+export function setRejected(id, rejected, opts = {}) {
   const d = getDb();
+  const row = d.prepare("SELECT * FROM companies WHERE id = ?").get(id);
+  if (!row) return { ok: false, message: "Company not found" };
   if (rejected) {
     d.prepare(
       `UPDATE companies SET is_rejected = 1, is_saved = 0, updated_at = datetime('now') WHERE id = ?`
     ).run(id);
-  } else {
-    d.prepare(`UPDATE companies SET is_rejected = 0, updated_at = datetime('now') WHERE id = ?`).run(id);
+    return { ok: true };
   }
+  if (!canRestoreRejectedRow(row, !!opts.force)) {
+    return {
+      ok: false,
+      refused: true,
+      message: "Cannot restore: auto-excluded as publicly listed",
+    };
+  }
+  d.prepare(`UPDATE companies SET is_rejected = 0, updated_at = datetime('now') WHERE id = ?`).run(id);
+  return { ok: true };
 }
 
 export function bulkRejectIds(ids) {
@@ -185,14 +290,22 @@ export function bulkRejectIds(ids) {
   return txn(ids);
 }
 
-export function bulkRestoreRejectedIds(ids) {
+/**
+ * @param {number[]} ids
+ * @param {{ force?: boolean }} [opts]
+ */
+export function bulkRestoreRejectedIds(ids, opts = {}) {
   const d = getDb();
+  const force = !!opts.force;
   const txn = d.transaction((list) => {
+    const sel = d.prepare("SELECT * FROM companies WHERE id = ?");
     const upd = d.prepare(
       `UPDATE companies SET is_rejected = 0, updated_at = datetime('now') WHERE id = ? AND is_rejected = 1`
     );
     let n = 0;
     for (const id of list) {
+      const row = sel.get(id);
+      if (!row || !canRestoreRejectedRow(row, force)) continue;
       n += upd.run(id).changes;
     }
     return n;
@@ -246,6 +359,33 @@ export function listActiveCompanySimilarityStubs() {
     .prepare(`SELECT id, domain, name, data FROM companies WHERE is_rejected = 0`)
     .all();
   return rows;
+}
+
+/** Scan active universe rows and permanently exclude obvious public listings. */
+export function rejectPublicListingsBackfill() {
+  let scanned = 0;
+  let rejected = 0;
+  for (const row of iterateActiveUniverseRows()) {
+    scanned += 1;
+    let data = {};
+    try {
+      data = JSON.parse(row.data || "{}");
+    } catch {
+      /* ignore */
+    }
+    const isPublic =
+      data.ownership_class === "Publicly Traded" ||
+      isPublicListingCandidate({ combinedText: buildCorpusFromCompanyData(data) });
+    if (!isPublic) continue;
+    markPublicCompanyExcluded({
+      domain: row.domain,
+      id: row.id,
+      source: "backfill",
+      extraData: data,
+    });
+    rejected += 1;
+  }
+  return { scanned, rejected };
 }
 
 /** Active rows in thesis-score order (for filtered pagination). */

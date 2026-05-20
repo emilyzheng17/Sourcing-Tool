@@ -84,7 +84,7 @@ When it finishes, every result is sorted by **thesis score** (higher = better fi
 Each card shows:
 
 - **Score** (left circle) — how well it matches your thesis.
-- **Ownership tag** — Founder-Operated / Vintage PE / Recent PE / Unknown.
+- **Ownership tag** — Founder-Operated / Vintage PE / Recent PE / Publicly Traded / Unknown. Publicly listed companies are removed automatically and do not return in new searches.
 - **MC / VI / Prop** — Mission-Critical / Vertically Integrated / Proprietary, Yes or No.
 - **Sources** chips — where the company was found (e.g. `PE:Mainsail Partners · G2 · Apollo`). Multiple sources = stronger signal.
 

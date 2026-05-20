@@ -19,6 +19,7 @@ import {
   insertEnrichmentJob,
   insertCompanyEvent,
   countPendingJobs,
+  listPublicExcludedDomains,
 } from "./db.js";
 import { startEnrichmentWorker, stopEnrichmentWorker } from "./workers/enrichmentWorker.js";
 import { startClassificationWorker, stopClassificationWorker } from "./workers/classificationWorker.js";
@@ -185,7 +186,7 @@ export async function startUniverseBuild(config, env, emit) {
       env,
       fetchOpts,
       (evt) => emitAll({ ...evt, type: evt.type === "log" ? "build:log" : `build:${evt.type}` }),
-      { deadline, exclude: new Set() },
+      { deadline, exclude: listPublicExcludedDomains() },
       (_key, getLatest) => {
         const c = getLatest();
         if (!c) return;

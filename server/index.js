@@ -17,6 +17,7 @@ import {
   listActiveCompanySimilarityStubs,
   getCompaniesByIds,
   iterateActiveUniverseRows,
+  rejectPublicListingsBackfill,
 } from "./db.js";
 import { companyPassesDiscoverFilters } from "../shared/discoverCompanyFilter.js";
 import { expandFromSavedPortfolio } from "./lib/savedProfileExpand.js";
@@ -29,6 +30,7 @@ import {
   getActiveJob,
 } from "./overnightPipeline.js";
 import { getBuildJob, listBuildJobs } from "./db.js";
+import { linkedInExportStatus } from "./lib/highTosEnv.js";
 
 // Undici's fetch() attaches several internal listeners per in-flight request. The search
 // pipeline runs many concurrent fetches (see pipeline.js p-limit); default limit is 10.
@@ -50,13 +52,15 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/settings-status", (_req, res) => {
   const env = process.env;
+  const linkedIn = linkedInExportStatus(env);
   res.json({
     brave: !!env.BRAVE_API_KEY,
     exa: !!env.EXA_API_KEY,
     apollo: !!env.APOLLO_API_KEY,
     crunchbase: !!env.CRUNCHBASE_API_KEY,
     tavily: !!env.TAVILY_API_KEY,
-    highRiskExports: !!(env.ENABLE_HIGH_TOS_SOURCES === "1" && env.LINKEDIN_EXPORT_PATH),
+    highRiskExports: linkedIn.ready,
+    linkedInExport: linkedIn,
     openai: !!env.OPENAI_API_KEY,
     anthropic: !!env.ANTHROPIC_API_KEY,
     gemini: !!env.GEMINI_API_KEY,
@@ -185,6 +189,15 @@ app.post("/api/universe/query", (req, res) => {
   }
 });
 
+app.post("/api/admin/reject-public-listings", (_req, res) => {
+  try {
+    const result = rejectPublicListingsBackfill();
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
 app.post("/api/companies/bulk-reject", (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x) => parseInt(String(x), 10)).filter(Number.isFinite) : [];
   if (!ids.length) {
@@ -241,10 +254,15 @@ app.post("/api/companies/:id/reject", (req, res) => {
     return;
   }
   const rejected = !!req.body?.rejected;
-  setRejected(id, rejected);
+  const force = !!req.body?.force;
+  const result = setRejected(id, rejected, { force });
   const row = getCompanyById(id);
   if (!row) {
     res.status(404).json({ ok: false, message: "Company not found" });
+    return;
+  }
+  if (!result.ok) {
+    res.status(result.refused ? 409 : 400).json({ ok: false, message: result.message });
     return;
   }
   res.json(rowToCompany(row));

@@ -3,12 +3,8 @@
  * Merged only when ENABLE_HIGH_TOS_SOURCES=1. See README.md in this folder.
  */
 
+import { isHighTosSourcesEnabled } from "../../lib/highTosEnv.js";
 import { readLinkedInExport } from "./linkedinExport.js";
-
-function highRiskEnabled(env) {
-  const e = env || process.env;
-  return e?.ENABLE_HIGH_TOS_SOURCES === "1";
-}
 
 /**
  * @param {object} _brief
@@ -16,7 +12,7 @@ function highRiskEnabled(env) {
  * @returns {Promise<Array<{ name: string; website: string; sourceTag: string; rawMetadata: object }>>}
  */
 export async function searchHighRiskSources(_brief, env) {
-  if (!highRiskEnabled(env)) return [];
+  if (!isHighTosSourcesEnabled(env)) return [];
   console.warn(
     "[highRisk] ENABLE_HIGH_TOS_SOURCES=1 — user-provided export ingest only; ToS/account risk is yours."
   );

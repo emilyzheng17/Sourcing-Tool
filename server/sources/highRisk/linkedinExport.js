@@ -1,6 +1,7 @@
 import fs from "fs";
 
 import { normalizeDomain, isLikelyCompanyDomain } from "../../lib/domains.js";
+import { resolveLinkedInExportPath } from "../../lib/highTosEnv.js";
 
 /** @param {string} line */
 function splitCsvLine(line) {
@@ -80,7 +81,7 @@ function coerceRow(raw, rowIndex) {
  * @param {NodeJS.ProcessEnv} env
  */
 export async function readLinkedInExport(env) {
-  const p = (env?.LINKEDIN_EXPORT_PATH || "").trim();
+  const p = resolveLinkedInExportPath(env?.LINKEDIN_EXPORT_PATH || "");
   if (!p || !fs.existsSync(p)) {
     console.warn("[highRisk] LINKEDIN_EXPORT_PATH missing or file not found; no rows ingested.");
     return [];

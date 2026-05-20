@@ -1,13 +1,14 @@
 import * as cheerio from "cheerio";
 import { fetchText } from "./lib/fetchText.js";
-import { normalizeDomain, isLikelyCompanyDomain } from "./lib/domains.js";
+import { normalizeDomain, isLikelyCompanyDomain, isDirectoryListingHost } from "./lib/domains.js";
 import { openCorporatesSearch } from "./openCorporates.js";
 import { extractOrganizationSignals } from "./lib/schemaOrgSignals.js";
 import { tryFetchAtsSignals } from "./lib/atsPublic.js";
 import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePageText.js";
 import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
 import { evaluateProductFit } from "./lib/productFit.js";
-import { shouldFastFailEnrichment } from "./lib/publicCompanySignals.js";
+import { isPublicListingCandidate } from "./lib/publicCompanySignals.js";
+import { markPublicCompanyExcluded } from "./db.js";
 import { cheapPreScore, DEFAULT_PRESCORE_THRESHOLD, DEFAULT_ACQUISITION_SCORE_THRESHOLD } from "./lib/cheapPreScore.js";
 import { getCached, putCached } from "./lib/dbCache.js";
 
@@ -117,11 +118,7 @@ export async function resolvePublicWebsite(candidate, fetchOpts = {}) {
   if (!url) return candidate;
   try {
     const host = new URL(url.startsWith("http") ? url : `https://${url}`).hostname.toLowerCase();
-    if (
-      host.includes("g2.com") ||
-      host.includes("capterra.com") ||
-      host.includes("getapp.com")
-    ) {
+    if (isDirectoryListingHost(host)) {
       const { ok, text } = await fetchText(url.startsWith("http") ? url : `https://${url}`, {
         timeout: 15000,
         ...fetchOpts,
@@ -139,7 +136,7 @@ export async function resolvePublicWebsite(candidate, fetchOpts = {}) {
         const ext = $("a[href^='http']").toArray().map((el) => $(el).attr("href")).find((h) => {
           if (!h) return false;
           const d = normalizeDomain(h);
-          return isLikelyCompanyDomain(d) && !d.includes("g2.com") && !d.includes("capterra.com");
+          return isLikelyCompanyDomain(d) && !isDirectoryListingHost(d);
         });
         if (ext) return { ...candidate, website: ext.split("?")[0] };
       }
@@ -282,7 +279,7 @@ export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {
 
   const sanitized = sanitizeScrapedPlainText(homepageText).toLowerCase();
 
-  const { cheapScore, fastFail, reasons } = cheapPreScore({
+  const { cheapScore, fastFail, reasons, fastFailKind } = cheapPreScore({
     homepageText: sanitized,
     title,
     metaDescription,
@@ -291,6 +288,17 @@ export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {
   });
 
   if (fastFail || cheapScore < threshold) {
+    if (fastFailKind === "public_listing" || reasons?.includes("public_listing")) {
+      markPublicCompanyExcluded({
+        domain,
+        source: "stage_a",
+        extraData: {
+          homepageTextSample: sanitized.slice(0, 4000),
+          title,
+          metaDescription,
+        },
+      });
+    }
     return null;
   }
 
@@ -392,6 +400,22 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   }
 
   combinedText = sanitizeScrapedPlainText(combinedText);
+
+  if (
+    isPublicListingCandidate({
+      combinedText: combinedText.toLowerCase(),
+    })
+  ) {
+    markPublicCompanyExcluded({
+      domain,
+      source: "stage_b",
+      extraData: {
+        homepageTextSample: combinedText.slice(0, 4000),
+        title,
+      },
+    });
+    return null;
+  }
 
   const htmlLower = (rawHtmlForSocial || "").toLowerCase();
   const $first = cheerio.load(rawHtmlForSocial || `<html><body>${combinedText}</body></html>`);

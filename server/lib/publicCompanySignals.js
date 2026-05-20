@@ -61,6 +61,47 @@ export function hasAgencyConsultancyNoise(corpus) {
 }
 
 /**
+ * @param {object} [input]
+ * @param {string} [input.homepageText]
+ * @param {string} [input.title]
+ * @param {string} [input.metaDescription]
+ * @param {string} [input.combinedText] — optional pre-merged corpus (Stage B)
+ * @returns {string} lowercased corpus
+ */
+export function buildDetectionCorpus({ homepageText = "", title = "", metaDescription = "", combinedText = "" } = {}) {
+  if (combinedText) return String(combinedText).toLowerCase();
+  return `${homepageText || ""} ${title || ""} ${metaDescription || ""}`.toLowerCase().trim();
+}
+
+/**
+ * @param {object} [input]
+ * @returns {{ isPublic: boolean, isAgency: boolean, corpus: string }}
+ */
+export function classifyHomepageSignals(input = {}) {
+  const corpus = buildDetectionCorpus(input);
+  const minLen = input.combinedText ? 40 : 80;
+  if (!corpus || corpus.length < minLen) {
+    return { isPublic: false, isAgency: false, corpus };
+  }
+  return {
+    isPublic: hasPublicListingSignals(corpus),
+    isAgency: hasAgencyConsultancyNoise(corpus),
+    corpus,
+  };
+}
+
+/**
+ * @param {object} [input]
+ * @returns {boolean}
+ */
+export function isPublicListingCandidate(input = {}) {
+  const { isPublic, corpus } = classifyHomepageSignals(input);
+  const minLen = input.combinedText ? 40 : 80;
+  if (!corpus || corpus.length < minLen) return false;
+  return isPublic;
+}
+
+/**
  * @param {string} homepagePlainLower — sanitized visible homepage text, lowercased
  */
 export function shouldFastFailEnrichment(homepagePlainLower) {

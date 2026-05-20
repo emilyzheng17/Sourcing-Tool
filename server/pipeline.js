@@ -3,7 +3,17 @@ import { enrichCandidateStageA, enrichCandidateStageB } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
 import { normalizeDomain } from "./lib/domains.js";
 import { discoverMergedCandidatesStreaming } from "./lib/candidateDiscovery.js";
-import { upsertCompany, getCompanyByDomain, getCompanyById, getFreshCompanyByDomain, rowToCompany } from "./db.js";
+import {
+  upsertCompany,
+  getCompanyByDomain,
+  getCompanyById,
+  getFreshCompanyByDomain,
+  rowToCompany,
+  markPublicCompanyExcluded,
+  listPublicExcludedDomains,
+} from "./db.js";
+import { isPublicListingCandidate } from "./lib/publicCompanySignals.js";
+import { isPublicExcludedRow, buildCorpusFromCompanyData } from "./lib/publicExclusion.js";
 import { breadthMultiplier } from "./lib/breadth.js";
 import { VERTICAL_MATCH_THRESHOLD, verticalFitThesisPenalty } from "./lib/verticalFit.js";
 import { normalizeToIso2 } from "../shared/geoCountry.js";
@@ -48,6 +58,7 @@ function applyPaidHints(candidate) {
 // #region runSearchPipeline
 export async function runSearchPipeline(brief, env, emit) {
   const exclude = new Set((brief.excludeDomains || []).map((x) => normalizeDomain(x)).filter(Boolean));
+  for (const d of listPublicExcludedDomains()) exclude.add(d);
 
   const m = breadthMultiplier(brief);
   const concurrency = m === 4 ? 14 : m === 2 ? 10 : 6;
@@ -91,8 +102,35 @@ export async function runSearchPipeline(brief, env, emit) {
           const cached = getFreshCompanyByDomain(domainGuess, ttlDays);
           if (cached) {
             completed += 1;
+            if (cached.is_rejected || isPublicExcludedRow(cached)) {
+              emit({
+                type: "log",
+                message: `Cache skip (excluded): ${cached.name || domainGuess}`,
+              });
+              emit({ type: "progress", processed: completed, total: progress.scheduled });
+              return;
+            }
+            const cachedCompany = rowToCompany(cached);
+            if (
+              isPublicListingCandidate({
+                combinedText: buildCorpusFromCompanyData(cachedCompany),
+              })
+            ) {
+              markPublicCompanyExcluded({
+                domain: domainGuess,
+                id: cached.id,
+                source: "cache_hit",
+                extraData: cachedCompany,
+              });
+              emit({
+                type: "log",
+                message: `Cache exclude (public listing): ${cached.name || domainGuess}`,
+              });
+              emit({ type: "progress", processed: completed, total: progress.scheduled });
+              return;
+            }
             emit({ type: "log", message: `Cache hit (${ttlDays}d TTL): ${cached.name || domainGuess}` });
-            emit({ type: "company", company: rowToCompany(cached) });
+            emit({ type: "company", company: cachedCompany });
             emit({ type: "progress", processed: completed, total: progress.scheduled });
             return;
           }
@@ -215,6 +253,19 @@ export async function runSearchPipeline(brief, env, emit) {
             scored.website,
           ].filter(Boolean),
         };
+
+        if (
+          scored.ownership_class === "Publicly Traded" ||
+          isPublicListingCandidate({ combinedText: buildCorpusFromCompanyData(payload) })
+        ) {
+          markPublicCompanyExcluded({
+            domain: scored.domain,
+            source: "pipeline",
+            extraData: payload,
+          });
+          emit({ type: "log", message: `Excluded (public listing): ${scored.name}` });
+          return;
+        }
 
         const id = upsertCompany({
           domain: scored.domain,

@@ -55,7 +55,10 @@ export function startEnrichmentWorker(jobId, config, env, emit, onDeadline) {
           updateCompanyStatus(companyId, "BASIC_ENRICHED", {
             last_enriched_at: new Date().toISOString(),
           });
-          insertCompanyEvent(companyId, "BASIC_ENRICHED", { skipped: true, reason: "pre-score reject" });
+          insertCompanyEvent(companyId, "BASIC_ENRICHED", {
+            skipped: true,
+            reason: "pre-score reject",
+          });
         })();
         emit({ type: "skipped", domain: job.domain, companyId });
         return;

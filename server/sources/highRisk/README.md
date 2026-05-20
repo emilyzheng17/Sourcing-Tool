@@ -10,8 +10,8 @@ This folder is intentionally **not** part of compliant-by-default discovery.
 
 Dual opt-in:
 
-1. `ENABLE_HIGH_TOS_SOURCES=1`
-2. `LINKEDIN_EXPORT_PATH` pointing at a readable file
+1. `ENABLE_HIGH_TOS_SOURCES=1` (also accepts `true` / `yes`, case-insensitive)
+2. `LINKEDIN_EXPORT_PATH` pointing at a readable `.json` or `.csv` (relative paths resolve from the server working directory)
 
 Optional caps: `LINKEDIN_RISK_MAX_ROWS` (default `500`)
 

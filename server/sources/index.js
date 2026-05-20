@@ -9,6 +9,12 @@ import { searchExa } from "./exa.js";
 import { searchApollo } from "./apollo.js";
 import { searchCrunchbase } from "./crunchbase.js";
 import { searchTrustRadius } from "./trustRadius.js";
+import { searchSoftwareAdvice } from "./softwareAdvice.js";
+import { searchSourceForge } from "./sourceforge.js";
+import { searchSlashdot } from "./slashdot.js";
+import { searchSaaSHub } from "./saashub.js";
+import { searchAlternativeTo } from "./alternativeTo.js";
+import { searchMarketplacePages } from "./marketplacePages.js";
 import { searchTavily } from "./tavily.js";
 import { searchHighRiskSources } from "./highRisk/index.js";
 
@@ -46,6 +52,12 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
     settle("apollo", searchApollo(brief, env)),
     settle("crunchbase", searchCrunchbase(brief, env)),
     settle("trustradius", searchTrustRadius(brief, fo)),
+    settle("softwareadvice", searchSoftwareAdvice(brief, fo)),
+    settle("sourceforge", searchSourceForge(brief, fo)),
+    settle("slashdot", searchSlashdot(brief, fo)),
+    settle("saashub", searchSaaSHub(brief, fo)),
+    settle("alternativeto", searchAlternativeTo(brief, fo)),
+    settle("marketplace", searchMarketplacePages(brief, fo)),
     settle("tavily", searchTavily(brief, procEnv)),
     settle("highRisk", searchHighRiskSources(brief, procEnv)),
   ]);
@@ -71,6 +83,12 @@ export async function fanOutSources(brief, env, fetchOpts) {
     apollo: [],
     crunchbase: [],
     trustradius: [],
+    softwareadvice: [],
+    sourceforge: [],
+    slashdot: [],
+    saashub: [],
+    alternativeto: [],
+    marketplace: [],
     tavily: [],
     highRisk: [],
   };

@@ -3,19 +3,19 @@
  */
 
 import { fanOutSourcesIncremental } from "../sources/index.js";
-import { normalizeDomain, mergeSourceTags, isLikelyCompanyDomain } from "./domains.js";
+import {
+  normalizeDomain,
+  mergeSourceTags,
+  isLikelyCompanyDomain,
+  isDirectoryListingHost,
+} from "./domains.js";
 
 const MAX_MERGE_CAP = 5000;
 
 export function primaryKey(c) {
   const d = normalizeDomain(c.website);
   if (!d) return "";
-  if (
-    d.includes("g2.com") ||
-    d.includes("capterra.com") ||
-    d.includes("getapp.com") ||
-    d.includes("trustradius.com")
-  ) {
+  if (isDirectoryListingHost(d)) {
     const slug = (c.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80);
     return `listing:${slug}`;
   }
@@ -79,13 +79,7 @@ export function passesPostMergeFilters(c, exclude) {
   const d = normalizeDomain(c.website);
   if (!d) return false;
   if (exclude.has(d)) return false;
-  if (
-    d.includes("g2.com") ||
-    d.includes("capterra.com") ||
-    d.includes("getapp.com") ||
-    d.includes("trustradius.com")
-  )
-    return true;
+  if (isDirectoryListingHost(d)) return true;
   return isLikelyCompanyDomain(d);
 }
 

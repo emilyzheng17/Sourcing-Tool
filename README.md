@@ -11,7 +11,7 @@ Deterministic, backend-driven sourcing for B2B industrial software vendors, tune
 1. **Discovers** companies from 13+ structured sources — **vertical-first**, then **product-specific** narrowing (PE portfolios, trade-association vendor lists, G2/Capterra/TrustRadius, Brave, Exa, Tavily, optional Apollo/Crunchbase, high-risk LinkedIn exports).
 2. **Pre-scores** each candidate with a cheap homepage fetch (25KB cap, 8s timeout) to discard obvious garbage before expensive work.
 3. **Enriches** high-potential candidates only (sub-pages, OpenCorporates registry, Brave acquisition queries gated behind score threshold).
-4. **Classifies ownership** as Founder Owned / Founder Operated / VC Backed / PE Owned / Unknown via a deterministic rule engine with digital-archaeology signals (copyright years, legacy stack hints, founder narrative detection).
+4. **Classifies ownership** as Publicly Traded / Founder Owned / Founder Operated / VC Backed / PE Owned / Unknown via a deterministic rule engine with digital-archaeology signals (copyright years, legacy stack hints, founder narrative detection). **Publicly listed** vendors are auto-excluded (rejected) and blocked from rediscovery.
 5. **Scores** against a configurable PE thesis using deterministic rules (no LLM required). Vertical-fit and product-fit scoring compare each candidate against the selected industry/product filters.
 6. **Optionally classifies** mission-critical / vertically-integrated / proprietary via a pluggable LLM (OpenAI, Anthropic, Gemini, or local Ollama). **Default: off.**
 7. **Persists** every result in SQLite (`universe.db`) with full audit trail (source attribution, enrichment events, priority scores) and supports manual analyst triage with reject/restore/save workflows.
@@ -196,7 +196,8 @@ Runtime-generated files (gitignored): `universe.db`, `dist/`, `node_modules/`.
 | `POST` | `/api/universe/query` | Server-side filtered universe query with full criteria matching |
 | `POST` | `/api/companies/:id/save` | `{saved:boolean}` toggle |
 | `POST` | `/api/companies/:id/classify` | `{manualMissionCritical?:"yes"\|"no"\|"maybe"\|"unset", ...}` |
-| `POST` | `/api/companies/:id/reject` | `{rejected:boolean}` toggle |
+| `POST` | `/api/companies/:id/reject` | `{rejected:boolean}` toggle (restore refused for auto public exclusions) |
+| `POST` | `/api/admin/reject-public-listings` | Backfill: scan active universe and reject rows with public-listing signals |
 | `POST` | `/api/companies/bulk-reject` | `{ids:[...]}` bulk reject |
 | `POST` | `/api/companies/bulk-restore` | `{ids:[...]}` bulk restore rejected |
 | `POST` | `/api/universe/similar-to-rejected` | Find companies similar to rejected anchors |
