@@ -11,6 +11,13 @@ import { isPublicListingCandidate } from "./lib/publicCompanySignals.js";
 import { markPublicCompanyExcluded } from "./db.js";
 import { cheapPreScore, DEFAULT_PRESCORE_THRESHOLD, DEFAULT_ACQUISITION_SCORE_THRESHOLD } from "./lib/cheapPreScore.js";
 import { getCached, putCached } from "./lib/dbCache.js";
+import {
+  extractHeadcountFromText,
+  extractFoundedYearFromText,
+  extractRevenueFromText,
+  formatEmployeeBandFromCount,
+} from "./lib/companyTextExtract.js";
+import { extractLeadershipFromText, mergeLeadershipCandidates } from "./lib/leadershipExtract.js";
 
 // #region Keyword lists & company-type classifier
 const BRAVE_ENRICH_CACHE_TTL_DAYS = 7;
@@ -185,24 +192,6 @@ function extractTechHints(headers, htmlLower) {
   if (htmlLower.includes("salesforce")) hints.push("Salesforce");
   if (htmlLower.includes("stripe")) hints.push("Stripe");
   return [...new Set(hints)].slice(0, 12);
-}
-
-function extractLeadership(text) {
-  const leadership = [];
-  const re =
-    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*[,|\-–]?\s*(Chief Executive Officer|CEO|CTO|CFO|COO|Founder|President|VP)/gi;
-  let m;
-  const seen = new Set();
-  while ((m = re.exec(text)) !== null && leadership.length < 12) {
-    const name = m[1]?.trim();
-    const title = m[2]?.trim();
-    if (!name || name.length < 3 || name.length > 48) continue;
-    const k = `${name}|${title}`.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    leadership.push({ name, title });
-  }
-  return leadership;
 }
 
 function extractHqLine(text, ocAddress) {
@@ -497,6 +486,10 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     const y = parseInt(oc.incorporationDate.slice(0, 4), 10);
     if (!Number.isNaN(y)) foundedYear = y;
   }
+  if (!foundedYear) {
+    const fyText = extractFoundedYearFromText(combinedText);
+    if (fyText) foundedYear = fyText;
+  }
 
   const acquisitionHistory = [];
   if (resolved.rawMetadata?.peFirm) {
@@ -547,13 +540,22 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   }
 
   const founderStillOperating = inferFounderCEO(lower, resolved.name);
-  const leadership = extractLeadership(combinedText.slice(0, 12000));
+  const leadership = mergeLeadershipCandidates(
+    extractLeadershipFromText(combinedText.slice(0, 12000)),
+    structured.people || [],
+  );
 
   /** @type {string|null} */
   let employeesText = employeesTextFromBody(combinedText);
   if (!employeesText && structured.employeesBand) employeesText = structured.employeesBand;
+  const headcountFromText = extractHeadcountFromText(combinedText);
   /** @type {string|null} */
-  const employeesMerged = resolved.employees ?? structured.employeesBand ?? null;
+  let employeesMerged = resolved.employees ?? structured.employeesBand ?? null;
+  if (!employeesMerged && headcountFromText) {
+    employeesMerged = formatEmployeeBandFromCount(headcountFromText);
+  }
+  /** @type {string|null} */
+  const revenueMerged = resolved.revenue ?? extractRevenueFromText(combinedText) ?? null;
   /** @type {string|null} */
   const hq = extractHqLine(combinedText, oc?.registeredAddress) ?? structured.addressSnippet ?? null;
 
@@ -631,7 +633,7 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     hq,
     country: oc?.jurisdiction || "US",
     employees: employeesMerged,
-    revenue: resolved.revenue ?? null,
+    revenue: revenueMerged,
     schemaOrgEmployeesBand: structured.employeesBand,
     homepageMetaDescription: structured.metaDescription,
     atsOpenRoles: atsSignals?.openRoles ?? null,

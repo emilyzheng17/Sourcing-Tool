@@ -1289,7 +1289,10 @@ export default function CompanySourcingTool() {
       pending[i] = "pending";
     });
     setEnrichRowStatus(pending);
-    setEnrichProgress({ processed: 0, total: enrichInputRows.length });
+    setEnrichProgress({
+      processed: 0,
+      total: enrichUseOllama ? enrichInputRows.length * 2 : enrichInputRows.length,
+    });
 
     const clearEnrichStaleTimer = () => {
       if (enrichStaleTimerRef.current) {
@@ -1298,6 +1301,7 @@ export default function CompanySourcingTool() {
       }
     };
 
+    const staleTimeoutMs = enrichUseOllama ? 180000 : 45000;
     const resetEnrichStaleTimer = (es) => {
       clearEnrichStaleTimer();
       enrichStaleTimerRef.current = setTimeout(() => {
@@ -1306,7 +1310,7 @@ export default function CompanySourcingTool() {
         es.close();
         enrichEventSourceRef.current = null;
         enrichStaleTimerRef.current = null;
-      }, 45000);
+      }, staleTimeoutMs);
     };
 
     const finishEnrichStream = (es) => {
@@ -2937,11 +2941,18 @@ export default function CompanySourcingTool() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-data text-muted-foreground">
                       <span>
-                        {enrichProgress.processed} / {enrichProgress.total} rows
+                        {enrichProgress.processed} / {enrichProgress.total}{" "}
+                        {enrichUseOllama ? "steps" : "rows"}
+                        {enrichUseOllama && enrichInputRows.length
+                          ? ` (${enrichInputRows.length} companies)`
+                          : ""}
                       </span>
                       <span>
                         {enrichProgress.total
-                          ? Math.round((enrichProgress.processed / enrichProgress.total) * 100)
+                          ? Math.min(
+                              100,
+                              Math.round((enrichProgress.processed / enrichProgress.total) * 100),
+                            )
                           : 0}
                         %
                       </span>
@@ -2950,7 +2961,14 @@ export default function CompanySourcingTool() {
                       <div
                         className="h-full rounded-full bg-primary transition-all duration-300"
                         style={{
-                          width: `${enrichProgress.total ? (enrichProgress.processed / enrichProgress.total) * 100 : 0}%`,
+                          width: `${
+                            enrichProgress.total
+                              ? Math.min(
+                                  100,
+                                  (enrichProgress.processed / enrichProgress.total) * 100,
+                                )
+                              : 0
+                          }%`,
                         }}
                       />
                     </div>

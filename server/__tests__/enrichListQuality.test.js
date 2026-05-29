@@ -8,7 +8,16 @@ import {
   pickBestOverview,
 } from "../lib/visiblePageText.js";
 import { pickEnrichListVerticals, ENRICH_LIST_VERTICAL_MIN } from "../lib/verticalFit.js";
-import { scoreDomainLookupResult, pickBestDomainLookupResult } from "../enrichByName.js";
+import {
+  scoreDomainLookupResult,
+  pickBestDomainLookupResult,
+  deriveQualityTier,
+  looksLikePersonName,
+  extractHeadcountFromText,
+  runEnrichListJob,
+  QUALITY_GOLD_MIN,
+  QUALITY_SILVER_MIN,
+} from "../enrichByName.js";
 
 const MIN_DOMAIN_LOOKUP_SCORE = 22;
 
@@ -124,6 +133,65 @@ test("pickEnrichListVerticals leaves blank when corpus is too weak", () => {
   assert.deepEqual(verts, []);
 });
 
-test("ENRICH_LIST_VERTICAL_MIN is stricter than discover threshold", () => {
-  assert.ok(ENRICH_LIST_VERTICAL_MIN >= 50);
+test("ENRICH_LIST_VERTICAL_MIN is tuned for enrich-list recall", () => {
+  assert.ok(ENRICH_LIST_VERTICAL_MIN >= 30);
+  assert.ok(ENRICH_LIST_VERTICAL_MIN <= 40);
+});
+
+test("deriveQualityTier maps thesis score to Gold/Silver/Bronze", () => {
+  assert.equal(deriveQualityTier(QUALITY_GOLD_MIN), "Gold");
+  assert.equal(deriveQualityTier(QUALITY_GOLD_MIN + 5), "Gold");
+  assert.equal(deriveQualityTier(QUALITY_SILVER_MIN), "Silver");
+  assert.equal(deriveQualityTier(QUALITY_SILVER_MIN - 1), "Bronze");
+  assert.equal(deriveQualityTier(0), "Bronze");
+});
+
+test("looksLikePersonName rejects departments and accepts real names", () => {
+  assert.equal(looksLikePersonName("John Smith"), true);
+  assert.equal(looksLikePersonName("Mary Jane Doe"), true);
+  assert.equal(looksLikePersonName("Sales Team"), false);
+  assert.equal(looksLikePersonName("Support"), false);
+});
+
+test("extractHeadcountFromText parses employee counts", () => {
+  assert.equal(extractHeadcountFromText("We are a team of 85 people building software."), 85);
+  assert.equal(extractHeadcountFromText("200+ employees worldwide"), 200);
+  assert.equal(extractHeadcountFromText("no numbers here"), null);
+});
+
+test("runEnrichListJob ollama pass progress never exceeds total", async () => {
+  const rows = [
+    { Company: "Alpha", Overview: "", Vertical: "", Ownership: "" },
+    { Company: "Beta", Overview: "Good overview text here.", Vertical: "Bulk Materials", Ownership: "FOFO" },
+    { Company: "Gamma", Overview: "", Vertical: "", Ownership: "" },
+  ];
+  const events = [];
+
+  await runEnrichListJob(
+    rows,
+    {},
+    (evt) => events.push(evt),
+    { useOllama: true, fillBlanksOnly: true },
+    {
+      enrichRowByName: async (row) => ({
+        ...row,
+        Website: "https://example.com",
+        Overview: row.Company === "Beta" ? "Established SaaS platform." : "",
+        Vertical: row.Company === "Beta" ? "Bulk Materials" : "",
+        Ownership: row.Company === "Beta" ? "FOFO" : "Unknown",
+      }),
+      ollamaEnrichListGapFill: () => ({
+        fill: async () => null,
+      }),
+    },
+  );
+
+  const progressEvents = events.filter((e) => e.type === "progress");
+  const maxProcessed = Math.max(...progressEvents.map((e) => e.processed));
+  const done = events.find((e) => e.type === "done");
+  assert.ok(done);
+  assert.equal(done.total, rows.length * 2);
+  assert.equal(done.processed, rows.length * 2);
+  assert.equal(maxProcessed, rows.length * 2);
+  assert.ok(maxProcessed <= done.total);
 });

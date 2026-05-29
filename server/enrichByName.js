@@ -20,6 +20,22 @@ import {
 import { extractOrganizationSignals } from "./lib/schemaOrgSignals.js";
 import { pickEnrichListVerticals, sanitizeCorpus } from "./lib/verticalFit.js";
 import { ollamaEnrichListGapFill } from "./providers/ollamaEnrichList.js";
+import { scoreThesis } from "./score.js";
+import { searchSerperQuery, searchTavilyQuery, searchBraveQuery } from "./lib/webSearch.js";
+import { searchCompanyFacts } from "./lib/factSearch.js";
+import {
+  looksLikePersonName,
+  extractHeadcountFromText,
+  extractFoundedYearFromText,
+  formatEmployeeBandFromCount,
+} from "./lib/companyTextExtract.js";
+import {
+  extractLeadershipFromText,
+  mergeLeadershipCandidates,
+  pickLeadershipContact,
+} from "./lib/leadershipExtract.js";
+
+export { looksLikePersonName, extractHeadcountFromText };
 
 const DOMAIN_LOOKUP_TTL_DAYS = 7;
 const MIN_DOMAIN_LOOKUP_SCORE = 22;
@@ -152,52 +168,21 @@ function pickBestResult(results, name) {
   return pickBestDomainLookupResult(results, name);
 }
 
-async function searchSerperQuery(query, env) {
-  const key = env.SERPER_API_KEY;
-  if (!key) return [];
-  const res = await fetch("https://google.serper.dev/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-KEY": key },
-    body: JSON.stringify({ q: query, num: 8 }),
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.organic || []).map((r) => ({ url: r.link, title: r.title, snippet: r.snippet }));
-}
-
-async function searchTavilyQuery(query, env) {
-  const key = env.TAVILY_API_KEY;
-  if (!key) return [];
-  const res = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: key,
-      query,
-      search_depth: "basic",
-      max_results: 8,
-      include_answer: false,
-    }),
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.results || []).map((r) => ({ url: r.url, title: r.title, snippet: r.content }));
-}
-
-async function searchBraveQuery(query, env) {
-  const key = env.BRAVE_API_KEY;
-  if (!key) return [];
-  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json", "X-Subscription-Token": key },
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.web?.results || data.results || []).map((r) => ({
-    url: r.url || r.link,
-    title: r.title,
-    snippet: r.description,
-  }));
+async function searchWebForDomain(query, env) {
+  const providers = [
+    () => searchSerperQuery(query, env),
+    () => searchTavilyQuery(query, env),
+    () => searchBraveQuery(query, env),
+  ];
+  for (const provider of providers) {
+    try {
+      const results = await provider();
+      if (results.length) return results;
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
 }
 
 export async function resolveDomainForName(name, env) {
@@ -209,24 +194,12 @@ export async function resolveDomainForName(name, env) {
   if (cached?.ok && cached.payload) return cached.payload;
 
   const query = `"${trimmed}" official site`;
-  const providers = [
-    () => searchSerperQuery(query, env),
-    () => searchTavilyQuery(query, env),
-    () => searchBraveQuery(query, env),
-  ];
-
-  for (const provider of providers) {
-    try {
-      const results = await provider();
-      const picked = pickBestResult(results, trimmed);
-      if (picked) {
-        const payload = { website: picked.website, domain: picked.domain };
-        putCached(cacheKey, "domain-lookup", true, payload);
-        return payload;
-      }
-    } catch {
-      /* try next provider */
-    }
+  const results = await searchWebForDomain(query, env);
+  const picked = pickBestResult(results, trimmed);
+  if (picked) {
+    const payload = { website: picked.website, domain: picked.domain };
+    putCached(cacheKey, "domain-lookup", true, payload);
+    return payload;
   }
 
   return null;
@@ -243,9 +216,49 @@ function joinUrl(base, path) {
   }
 }
 
-async function extractEmailFromSite(base, fetchOpts = {}) {
-  const urls = [base, joinUrl(base, "/contact")];
+const GENERIC_EMAIL_LOCAL = /^(info|sales|support|contact|hello|admin|office|marketing|hr|careers|jobs|noreply|no-reply)$/i;
+
+/** @param {string} email @param {string} [companyDomain] @param {string} [contactName] */
+function scoreEmailCandidate(email, companyDomain, contactName) {
+  let score = 0;
+  const parts = email.split("@");
+  if (parts.length !== 2) return -1;
+  const [local, domain] = parts;
+  if (companyDomain && domain === companyDomain) score += 25;
+  else if (companyDomain && domain.endsWith(`.${companyDomain}`)) score += 15;
+  if (/^[a-z][a-z0-9._-]*\.[a-z][a-z0-9._-]*@/i.test(email)) score += 10;
+  if (GENERIC_EMAIL_LOCAL.test(local)) score -= 8;
+  if (/\.(png|jpg|gif|svg|webp)$/i.test(email)) return -1;
+
+  if (contactName) {
+    const nameParts = contactName
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((p) => p.length >= 2);
+    const localLower = local.toLowerCase();
+    if (nameParts.length >= 2) {
+      const first = nameParts[0];
+      const last = nameParts[nameParts.length - 1];
+      if (localLower === `${first}.${last}`) score += 30;
+      else if (localLower.includes(`${first}.${last}`)) score += 22;
+      else if (localLower.includes(first) && localLower.includes(last)) score += 18;
+      else if (localLower.startsWith(first[0]) && localLower.includes(last)) score += 12;
+    }
+  }
+
+  return score;
+}
+
+async function extractEmailFromSite(base, fetchOpts = {}, contactName = "") {
+  const urls = [
+    base,
+    joinUrl(base, "/contact"),
+    joinUrl(base, "/about"),
+    joinUrl(base, "/team"),
+    joinUrl(base, "/leadership"),
+  ];
   const emails = new Set();
+  const companyDomain = normalizeDomain(base);
 
   for (const url of urls) {
     try {
@@ -260,7 +273,7 @@ async function extractEmailFromSite(base, fetchOpts = {}) {
       const matches = text.match(re) || [];
       for (const m of matches) {
         const lower = m.toLowerCase();
-        if (/example\.com|sentry\.io|wixpress|cloudflare|schema\.org/i.test(lower)) continue;
+        if (/example\.com|sentry\.io|wixpress|cloudflare|schema\.org|w3\.org|gravatar/i.test(lower)) continue;
         emails.add(lower);
       }
     } catch {
@@ -268,16 +281,54 @@ async function extractEmailFromSite(base, fetchOpts = {}) {
     }
   }
 
-  return [...emails].slice(0, 3).join("\r\n");
+  const ranked = [...emails]
+    .map((email) => ({ email, score: scoreEmailCandidate(email, companyDomain, contactName) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.email || "";
 }
 
-function pickLeadershipContact(leadership) {
-  if (!Array.isArray(leadership) || !leadership.length) {
-    return { contactName: "", role: "" };
+function mergeEnrichedWithFacts(enriched, facts) {
+  if (!enriched) return enriched;
+  if (!facts) return enriched;
+
+  const leadership = mergeLeadershipCandidates(enriched.leadership, facts.leadershipCandidates);
+  const out = { ...enriched, leadership };
+
+  if (!out.employees && facts.employees) out.employees = facts.employees;
+  if (!out.foundedYear && facts.foundedYear) out.foundedYear = facts.foundedYear;
+  if (!out.revenue && facts.revenue) out.revenue = facts.revenue;
+  if (facts.snippetCorpus) out.factSearchSnippets = facts.snippetCorpus;
+  if (facts.linkedinUrl) {
+    out.social = { ...(out.social || {}), linkedin: facts.linkedinUrl };
   }
-  const priority = /ceo|founder|president|chief executive/i;
-  const pick = leadership.find((l) => priority.test(l.title || "")) || leadership[0];
-  return { contactName: pick.name || "", role: pick.title || "" };
+  return out;
+}
+
+function buildEnrichContextText(context, fields = {}) {
+  return [
+    context?.homepageTextSample,
+    context?.combinedTextSample,
+    context?.braveSnippet,
+    context?.factSearchSnippets,
+    context?.description,
+    fields.overview,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export const QUALITY_GOLD_MIN = 70;
+export const QUALITY_SILVER_MIN = 45;
+
+/** @param {number} thesisScore */
+export function deriveQualityTier(thesisScore) {
+  const s = Number(thesisScore);
+  if (!Number.isFinite(s)) return "Bronze";
+  if (s >= QUALITY_GOLD_MIN) return "Gold";
+  if (s >= QUALITY_SILVER_MIN) return "Silver";
+  return "Bronze";
 }
 
 function mapOwnershipToSpreadsheet(ownershipClass, founderStillOperating) {
@@ -322,28 +373,22 @@ async function minimalEnrichFromWebsite(name, website, fetchOpts = {}) {
     homepageTextSample: homepageText,
   });
 
-  const leadership = [];
-  const re =
-    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*[,|\-–]?\s*(Chief Executive Officer|CEO|CTO|CFO|COO|Founder|President|VP)/gi;
-  let m;
-  const seen = new Set();
-  while ((m = re.exec(homepageText)) !== null && leadership.length < 8) {
-    const contactName = m[1]?.trim();
-    const role = m[2]?.trim();
-    if (!contactName || contactName.length < 3) continue;
-    const k = `${contactName}|${role}`.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    leadership.push({ name: contactName, title: role });
-  }
+  const leadership = mergeLeadershipCandidates(
+    extractLeadershipFromText(homepageText),
+    structured.people || [],
+  );
 
-  const email = await extractEmailFromSite(base, fetchOpts);
   const { contactName, role } = pickLeadershipContact(leadership);
+  const email = await extractEmailFromSite(base, fetchOpts, contactName);
   const domain = normalizeDomain(base);
 
   const fitCorpus = sanitizeCorpus(homepageText);
   const verticals = pickEnrichListVerticals(name, fitCorpus, "");
   const vertical = verticals.join(", ");
+
+  const headcount = extractHeadcountFromText(homepageText);
+  const foundedYear = structured.foundedYear ?? extractFoundedYearFromText(homepageText);
+  const employees = structured.employeesBand || (headcount ? formatEmployeeBandFromCount(headcount) : null);
 
   const ownershipResult = inferOwnershipClass({
     name,
@@ -358,9 +403,9 @@ async function minimalEnrichFromWebsite(name, website, fetchOpts = {}) {
     domain,
     name,
     description,
-    foundedYear: null,
+    foundedYear,
     country: "US",
-    employees: null,
+    employees,
     revenue: null,
     vertical,
     verticals,
@@ -380,6 +425,15 @@ function buildSpreadsheetFields(enriched, emailOverride) {
   const { contactName, role } = pickLeadershipContact(enriched.leadership);
   const email = emailOverride || "";
 
+  const verticalList = enriched.verticals?.length
+    ? enriched.verticals
+    : deriveVertical(enriched)
+        .split(/,\s*/)
+        .filter(Boolean);
+  const brief = { ...PERMISSIVE_BRIEF, selectedVerticals: verticalList };
+  const { thesisScore } = scoreThesis(enriched, brief);
+  const quality = deriveQualityTier(thesisScore);
+
   return {
     website: enriched.website || (enriched.domain ? `https://${enriched.domain}` : ""),
     vertical: deriveVertical(enriched),
@@ -392,6 +446,7 @@ function buildSpreadsheetFields(enriched, emailOverride) {
     contactName,
     role,
     email,
+    quality,
   };
 }
 
@@ -408,6 +463,7 @@ function applyEnrichedToRow(row, fields) {
   setRowValue(out, row, ["contact name"], fields.contactName);
   setRowValue(out, row, ["role"], fields.role);
   setRowValue(out, row, ["email"], fields.email);
+  setRowValue(out, row, ["quality"], fields.quality);
   return out;
 }
 
@@ -429,7 +485,24 @@ function inputCellBlank(row, aliases) {
   return !getRowValue(row, aliases);
 }
 
-/** @returns {("overview"|"vertical"|"ownership")[]} */
+function isRuleContactWeak(contactName) {
+  const v = String(contactName ?? "").trim();
+  return !v || !looksLikePersonName(v);
+}
+
+function isRuleEmployeeWeak(employee) {
+  return !String(employee ?? "").trim();
+}
+
+function isRuleYearFoundedWeak(yearFounded) {
+  return !String(yearFounded ?? "").trim();
+}
+
+function isRuleEstRevenueWeak(estRevenue) {
+  return !String(estRevenue ?? "").trim();
+}
+
+/** @returns {("overview"|"vertical"|"ownership"|"employee"|"yearFounded"|"estRevenue"|"contactName")[]} */
 export function detectEnrichListFieldsNeeded(inputRow, ruleFields, fillBlanksOnly = true) {
   const needed = [];
   const checks = [
@@ -447,6 +520,26 @@ export function detectEnrichListFieldsNeeded(inputRow, ruleFields, fillBlanksOnl
       key: "ownership",
       aliases: ["ownership"],
       weak: () => isRuleOwnershipWeak(ruleFields.ownership),
+    },
+    {
+      key: "employee",
+      aliases: ["employee", "employees", "employee "],
+      weak: () => isRuleEmployeeWeak(ruleFields.employee),
+    },
+    {
+      key: "yearFounded",
+      aliases: ["year founded"],
+      weak: () => isRuleYearFoundedWeak(ruleFields.yearFounded),
+    },
+    {
+      key: "estRevenue",
+      aliases: ["est. revenue", "est revenue"],
+      weak: () => isRuleEstRevenueWeak(ruleFields.estRevenue),
+    },
+    {
+      key: "contactName",
+      aliases: ["contact name"],
+      weak: () => isRuleContactWeak(ruleFields.contactName),
     },
   ];
 
@@ -471,33 +564,51 @@ export function mergeOllamaEnrichFields(ruleFields, ollamaResult, fieldsNeeded) 
   if (fieldsNeeded.includes("ownership") && ollamaResult.ownership) {
     out.ownership = ollamaResult.ownership;
   }
+  if (fieldsNeeded.includes("employee") && ollamaResult.employees) {
+    out.employee = ollamaResult.employees;
+  }
+  if (fieldsNeeded.includes("yearFounded") && ollamaResult.foundedYear) {
+    out.yearFounded = ollamaResult.foundedYear;
+  }
+  if (fieldsNeeded.includes("estRevenue") && ollamaResult.revenue) {
+    out.estRevenue = ollamaResult.revenue;
+  }
+  if (fieldsNeeded.includes("contactName") && ollamaResult.contactName) {
+    out.contactName = ollamaResult.contactName;
+    if (ollamaResult.role) out.role = ollamaResult.role;
+  }
   return out;
+}
+
+function ruleFieldsFromSpreadsheetFields(fields) {
+  return {
+    website: fields.website || "",
+    overview: fields.overview || "",
+    vertical: fields.vertical || "",
+    ownership: fields.ownership || "",
+    employee: fields.employee || "",
+    yearFounded: fields.yearFounded ?? "",
+    estRevenue: fields.estRevenue || "",
+    contactName: fields.contactName || "",
+    role: fields.role || "",
+  };
 }
 
 async function maybeApplyOllamaGapFill(row, fields, enrichedContext, name, env, options = {}) {
   if (!options.useOllama) return fields;
 
-  const fieldsNeeded = detectEnrichListFieldsNeeded(row, fields, options.fillBlanksOnly !== false);
+  const ruleFields = ruleFieldsFromSpreadsheetFields(fields);
+  const fieldsNeeded = detectEnrichListFieldsNeeded(row, ruleFields, options.fillBlanksOnly !== false);
   if (!fieldsNeeded.length) return fields;
 
-  const homepageText = [
-    enrichedContext?.homepageTextSample,
-    enrichedContext?.braveSnippet,
-    enrichedContext?.description,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const homepageText = buildEnrichContextText(enrichedContext, fields);
 
   const filler = ollamaEnrichListGapFill(env);
   const result = await filler.fill({
     companyName: name,
     website: fields.website,
     homepageText,
-    ruleFields: {
-      overview: fields.overview,
-      vertical: fields.vertical,
-      ownership: fields.ownership,
-    },
+    ruleFields,
     fieldsNeeded,
   });
 
@@ -554,53 +665,65 @@ export async function enrichRowByName(row, env, fetchOpts = {}, options = {}) {
     enriched = await enrichCandidateStageB(candidate, stageA, PERMISSIVE_BRIEF, enrichEnv, fetchOpts);
   }
 
-  let email = "";
   const baseUrl = enriched?.website || website;
+  const domain = normalizeDomain(baseUrl);
+  const facts = await searchCompanyFacts(name, domain, env);
 
   if (enriched) {
-    email = await extractEmailFromSite(baseUrl, fetchOpts);
+    enriched = mergeEnrichedWithFacts(enriched, facts);
+    const { contactName } = pickLeadershipContact(enriched.leadership);
+    const email = await extractEmailFromSite(baseUrl, fetchOpts, contactName);
     let fields = buildSpreadsheetFields(enriched, email);
     fields = await maybeApplyOllamaGapFill(row, fields, enriched, name, env, options);
-    return applyEnrichedToRow(row, fields);
+    const out = applyEnrichedToRow(row, fields);
+    if (options.returnContext) return { row: out, context: enriched };
+    return out;
   }
 
-  const minimal = await minimalEnrichFromWebsite(name, baseUrl, fetchOpts);
-  let fields = {
-    website: minimal.website,
-    vertical: minimal.vertical,
-    country: minimal.country,
-    yearFounded: minimal.foundedYear ?? "",
-    employee: minimal.employees || "",
-    estRevenue: minimal.revenue || "",
-    overview: minimal.description || "",
-    ownership: minimal.ownership,
-    contactName: minimal.contactName,
-    role: minimal.role,
-    email: minimal.email,
-  };
+  let minimal = await minimalEnrichFromWebsite(name, baseUrl, fetchOpts);
+  minimal = mergeEnrichedWithFacts(minimal, facts);
+  const { contactName } = pickLeadershipContact(minimal.leadership);
+  const email = await extractEmailFromSite(baseUrl, fetchOpts, contactName);
+  let fields = buildSpreadsheetFields(minimal, email);
   fields = await maybeApplyOllamaGapFill(row, fields, minimal, name, env, options);
-  return applyEnrichedToRow(row, fields);
+  const out = applyEnrichedToRow(row, fields);
+  if (options.returnContext) return { row: out, context: minimal };
+  return out;
 }
 
-export async function runEnrichListJob(rows, env, emit, options = {}) {
+export async function runEnrichListJob(rows, env, emit, options = {}, deps = {}) {
+  const enrichFn = deps.enrichRowByName ?? enrichRowByName;
+  const gapFillFactory = deps.ollamaEnrichListGapFill ?? ollamaEnrichListGapFill;
   const fetchCache = new Map();
   const jitterHostState = new Map();
   const fetchOpts = { cache: fetchCache, jitterHostState };
 
-  const concurrency = options.useOllama ? 2 : 5;
-  const queue = new PQueue({ concurrency });
-  let processed = 0;
+  const useOllama = !!options.useOllama;
+  const rulesOptions = { ...options, useOllama: false, returnContext: true };
+
   const total = rows.length;
+  const ollamaTotal = useOllama ? total * 2 : total;
+  let processed = 0;
 
-  emit({ type: "progress", processed: 0, total });
+  emit({ type: "progress", processed: 0, total: ollamaTotal });
 
-  for (let index = 0; index < rows.length; index++) {
+  const ruleResults = new Array(total);
+  const enrichedContexts = new Array(total);
+
+  const rulesQueue = new PQueue({ concurrency: 5 });
+
+  for (let index = 0; index < total; index++) {
     const row = rows[index];
-    queue.add(async () => {
+    rulesQueue.add(async () => {
       try {
-        const enriched = await enrichRowByName(row, env, fetchOpts, options);
-        emit({ type: "row", index, status: "ok", input: row, enriched });
+        const enrichResult = await enrichFn(row, env, fetchOpts, rulesOptions);
+        const enrichedRow = enrichResult?.row ?? enrichResult;
+        const context = enrichResult?.context ?? null;
+        ruleResults[index] = { status: "ok", enriched: enrichedRow };
+        enrichedContexts[index] = context;
+        emit({ type: "row", index, status: "ok", input: row, enriched: enrichedRow });
       } catch (e) {
+        ruleResults[index] = { status: "error", enriched: row };
         emit({
           type: "row",
           index,
@@ -611,13 +734,98 @@ export async function runEnrichListJob(rows, env, emit, options = {}) {
         });
       } finally {
         processed += 1;
-        emit({ type: "progress", processed, total });
+        emit({ type: "progress", processed, total: ollamaTotal });
       }
     });
   }
 
-  await queue.onIdle();
+  await rulesQueue.onIdle();
+
+  if (useOllama) {
+    emit({ type: "log", message: "Starting Ollama gap-fill pass…" });
+    const ollamaQueue = new PQueue({ concurrency: 1 });
+
+    for (let index = 0; index < total; index++) {
+      const row = rows[index];
+      const result = ruleResults[index];
+      if (!result || result.status !== "ok") {
+        processed += 1;
+        emit({ type: "progress", processed, total: ollamaTotal });
+        continue;
+      }
+
+      ollamaQueue.add(async () => {
+        try {
+          const spreadsheetFields = {
+            website: getRowValue(result.enriched, ["website"]) || "",
+            overview: getRowValue(result.enriched, ["overview"]) || "",
+            vertical: getRowValue(result.enriched, ["vertical"]) || "",
+            ownership: getRowValue(result.enriched, ["ownership"]) || "",
+            employee: getRowValue(result.enriched, ["employee", "employees", "employee "]) || "",
+            yearFounded: getRowValue(result.enriched, ["year founded"]) || "",
+            estRevenue: getRowValue(result.enriched, ["est. revenue", "est revenue"]) || "",
+            contactName: getRowValue(result.enriched, ["contact name"]) || "",
+            role: getRowValue(result.enriched, ["role"]) || "",
+          };
+          const ruleFields = ruleFieldsFromSpreadsheetFields(spreadsheetFields);
+
+          const fieldsNeeded = detectEnrichListFieldsNeeded(row, ruleFields, options.fillBlanksOnly !== false);
+          if (!fieldsNeeded.length) {
+            return;
+          }
+
+          const homepageText = buildEnrichContextText(enrichedContexts[index], spreadsheetFields);
+
+          const filler = gapFillFactory(env);
+          const ollamaResult = await filler.fill({
+            companyName: String(row[detectCompanyColumn(row)] ?? "").trim(),
+            website: ruleFields.website,
+            homepageText,
+            ruleFields,
+            fieldsNeeded,
+          });
+
+          if (ollamaResult) {
+            const merged = mergeOllamaEnrichFields(spreadsheetFields, ollamaResult, fieldsNeeded);
+            const updated = { ...result.enriched };
+            if (fieldsNeeded.includes("overview") && merged.overview) {
+              setRowValue(updated, row, ["overview"], merged.overview);
+            }
+            if (fieldsNeeded.includes("vertical") && merged.vertical) {
+              setRowValue(updated, row, ["vertical"], merged.vertical);
+            }
+            if (fieldsNeeded.includes("ownership") && merged.ownership) {
+              setRowValue(updated, row, ["ownership"], merged.ownership);
+            }
+            if (fieldsNeeded.includes("employee") && merged.employee) {
+              setRowValue(updated, row, ["employee", "employees", "employee "], merged.employee);
+            }
+            if (fieldsNeeded.includes("yearFounded") && merged.yearFounded) {
+              setRowValue(updated, row, ["year founded"], merged.yearFounded);
+            }
+            if (fieldsNeeded.includes("estRevenue") && merged.estRevenue) {
+              setRowValue(updated, row, ["est. revenue", "est revenue"], merged.estRevenue);
+            }
+            if (fieldsNeeded.includes("contactName") && merged.contactName) {
+              setRowValue(updated, row, ["contact name"], merged.contactName);
+              if (merged.role) setRowValue(updated, row, ["role"], merged.role);
+            }
+            ruleResults[index].enriched = updated;
+            emit({ type: "row", index, status: "ok", input: row, enriched: updated });
+          }
+        } catch (e) {
+          console.warn(`[ollama-gap-fill] row ${index} error: ${e.message || e}`);
+        } finally {
+          processed += 1;
+          emit({ type: "progress", processed, total: ollamaTotal });
+        }
+      });
+    }
+
+    await ollamaQueue.onIdle();
+  }
+
   fetchCache.clear();
-  emit({ type: "done", total, processed });
+  emit({ type: "done", total: ollamaTotal, processed });
 }
 // #endregion

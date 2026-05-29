@@ -331,7 +331,8 @@ export function evaluateVerticalFit(selectedVerticals, corpusLower, apolloIndust
   };
 }
 
-export const ENRICH_LIST_VERTICAL_MIN = 50;
+export const ENRICH_LIST_VERTICAL_MIN = 35;
+export const ENRICH_LIST_SINGLE_HINT_MIN = 30;
 export const ENRICH_LIST_TOP2_GAP = 10;
 
 /**
@@ -356,13 +357,24 @@ export function pickEnrichListVerticals(companyName, corpusLower, apolloIndustry
 
   const filtered = entries.filter((e) => {
     if (e.score < ENRICH_LIST_VERTICAL_MIN) return false;
-    if (e.vertical === "Metals & Mining" && hasMineInName && e.matchedHints.length < 2) {
+    if (e.vertical === "Metals & Mining" && hasMineInName && e.matchedHints.length < 1) {
       return false;
     }
     return true;
   });
 
-  if (!filtered.length) return [];
+  if (!filtered.length) {
+    const top = entries[0];
+    if (
+      top &&
+      top.score >= ENRICH_LIST_SINGLE_HINT_MIN &&
+      top.matchedHints.length >= 1 &&
+      !(top.vertical === "Metals & Mining" && hasMineInName && top.matchedHints.length < 1)
+    ) {
+      return [top.vertical];
+    }
+    return [];
+  }
 
   const out = [filtered[0].vertical];
   if (

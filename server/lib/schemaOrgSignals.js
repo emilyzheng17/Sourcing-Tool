@@ -9,11 +9,22 @@ export function extractOrganizationSignals(html) {
   let employeesBand = null;
   /** @type {string|null} */
   let addressSnippet = null;
+  /** @type {Array<{ name: string, title: string }>} */
+  const people = [];
 
   /** @type {string|null} */
   const metaDescription = extractMetaDesc(html);
 
   const blocks = [];
+
+  /** @param {unknown} personNode */
+  const addPerson = (personNode) => {
+    if (!personNode || typeof personNode !== "object") return;
+    const p = personNode;
+    const name = coercePersonName(p.name);
+    const title = coercePersonTitle(p.jobTitle ?? p.title ?? p.role);
+    if (name && title) people.push({ name, title });
+  };
 
   /** @param {unknown} node */
   const walkLd = (node) => {
@@ -28,10 +39,15 @@ export function extractOrganizationSignals(html) {
           t
         )
       );
+    const isPerson = typesLow.includes("person");
 
     const graph = n["@graph"];
     if (Array.isArray(graph)) {
       for (const g of graph) walkLd(g);
+    }
+
+    if (isPerson) {
+      addPerson(n);
     }
 
     if (isOrgLike) {
@@ -47,6 +63,12 @@ export function extractOrganizationSignals(html) {
 
       const addr = formatAddressSnippet(n.address);
       if (addr && (!addressSnippet || addr.length > addressSnippet.length)) addressSnippet = addr;
+
+      for (const key of ["founder", "employee", "employees", "member", "members"]) {
+        const val = n[key];
+        if (Array.isArray(val)) val.forEach((item) => walkLd(item));
+        else if (val && typeof val === "object") walkLd(val);
+      }
     }
   };
 
@@ -68,7 +90,24 @@ export function extractOrganizationSignals(html) {
     }
   }
 
-  return { foundedYear, employeesBand, addressSnippet, metaDescription };
+  return { foundedYear, employeesBand, addressSnippet, metaDescription, people };
+}
+
+/** @param {unknown} raw */
+function coercePersonName(raw) {
+  if (typeof raw === "string") return stripTags(raw).slice(0, 80);
+  if (raw && typeof raw === "object" && typeof raw.name === "string") return stripTags(raw.name).slice(0, 80);
+  return "";
+}
+
+/** @param {unknown} raw */
+function coercePersonTitle(raw) {
+  if (typeof raw === "string") return stripTags(raw).slice(0, 120);
+  if (Array.isArray(raw)) {
+    const first = raw.find((x) => typeof x === "string");
+    if (first) return stripTags(first).slice(0, 120);
+  }
+  return "";
 }
 
 function extractMetaDesc(html) {
