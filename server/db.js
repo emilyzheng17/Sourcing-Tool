@@ -291,6 +291,23 @@ export function bulkRejectIds(ids) {
 }
 
 /**
+ * @param {number} minScore
+ * @returns {number} count of companies newly saved
+ */
+export function bulkSaveAboveScore(minScore) {
+  const result = getDb()
+    .prepare(
+      `UPDATE companies
+       SET is_saved = 1, updated_at = datetime('now')
+       WHERE is_rejected = 0
+         AND is_saved = 0
+         AND COALESCE(json_extract(data, '$.score'), json_extract(data, '$.thesisScore'), 0) >= ?`
+    )
+    .run(minScore);
+  return result.changes;
+}
+
+/**
  * @param {number[]} ids
  * @param {{ force?: boolean }} [opts]
  */

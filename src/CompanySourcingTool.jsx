@@ -227,6 +227,9 @@ export default function CompanySourcingTool() {
   const [similarMinScore, setSimilarMinScore] = useState(0.84);
   const [selectedSimilarIds, setSelectedSimilarIds] = useState([]);
   const [bulkRejectLoading, setBulkRejectLoading] = useState(false);
+  const [showSaveAboveModal, setShowSaveAboveModal] = useState(false);
+  const [saveAboveScore, setSaveAboveScore] = useState(80);
+  const [bulkSaveAboveLoading, setBulkSaveAboveLoading] = useState(false);
   const [deleteAllSavedLoading, setDeleteAllSavedLoading] = useState(false);
   const [restoreSelectedLoading, setRestoreSelectedLoading] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -621,6 +624,35 @@ export default function CompanySourcingTool() {
       loadUniverseRows();
     } catch {
       /* ignore */
+    }
+  };
+
+  const bulkSaveAboveScoreThreshold = async () => {
+    const minScore = Number(saveAboveScore);
+    if (Number.isNaN(minScore) || minScore < 0 || minScore > 100) {
+      window.alert("Score must be between 0 and 100.");
+      return;
+    }
+    setBulkSaveAboveLoading(true);
+    try {
+      const r = await fetch("/api/companies/bulk-save-above-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minScore }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        window.alert(data.error || data.message || "Bulk save failed.");
+        return;
+      }
+      setShowSaveAboveModal(false);
+      loadSavedRows();
+      loadUniverseRows();
+      window.alert(`Saved ${data.savedCount ?? 0} companies with score ≥ ${minScore}.`);
+    } catch {
+      window.alert("Bulk save failed.");
+    } finally {
+      setBulkSaveAboveLoading(false);
     }
   };
 
@@ -1786,7 +1818,7 @@ export default function CompanySourcingTool() {
                     </div>
                     {searchProgress && searchProgress.total > 0 && (
                       <p className="text-muted-foreground">
-                        Progress: {searchProgress.processed} / {searchProgress.total} enriched
+                        Progress: {searchProgress.processed} / {searchProgress.total} processed
                       </p>
                     )}
                   </div>
@@ -2344,6 +2376,13 @@ export default function CompanySourcingTool() {
                   className="rounded-md border border-border bg-card px-3 py-2 text-data font-medium text-foreground shadow-sm hover:bg-muted/80"
                 >
                   Clear filters
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowSaveAboveModal(true)}
+                  className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-data font-medium text-primary shadow-sm hover:bg-primary/15"
+                >
+                  Save all above score
                 </button>
                 {universeRows.length < universeTotal && (
                   <button
@@ -3174,6 +3213,61 @@ export default function CompanySourcingTool() {
         </div>
       </div>
 
+      {showSaveAboveModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-background/80 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="save-above-modal-title"
+          onClick={() => !bulkSaveAboveLoading && setShowSaveAboveModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border border-border bg-card shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-b border-border px-4 py-3">
+              <h2 id="save-above-modal-title" className="text-ui font-semibold text-foreground">
+                Save all above score
+              </h2>
+              <p className="mt-1 text-data text-muted-foreground">
+                Save every active universe company at or above this thesis score (0–100).
+              </p>
+            </div>
+            <div className="space-y-3 p-4">
+              <label className="block text-data text-foreground">
+                Minimum score
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={saveAboveScore}
+                  onChange={(e) => setSaveAboveScore(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-data tabular-nums"
+                />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border p-3">
+              <button
+                type="button"
+                disabled={bulkSaveAboveLoading}
+                onClick={() => setShowSaveAboveModal(false)}
+                className="rounded-md border border-border px-3 py-2 text-data font-medium hover:bg-muted disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={bulkSaveAboveLoading}
+                onClick={bulkSaveAboveScoreThreshold}
+                className="rounded-md border border-primary bg-primary px-3 py-2 text-data font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {bulkSaveAboveLoading ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {similarModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-background/80 p-4 sm:items-center"
@@ -3508,7 +3602,7 @@ export default function CompanySourcingTool() {
                 </div>
                 {(recPreview.recommendationExaQueries || []).length > 0 && apiStatus?.exa && (
                   <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Exa neural</div>
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Exa</div>
                     <ul className="mt-2 list-inside list-disc space-y-1 text-muted-foreground">
                       {(recPreview.recommendationExaQueries || []).map((q, i) => (
                         <li key={`${i}-${q.slice(0, 48)}`}>{q}</li>

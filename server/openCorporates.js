@@ -1,4 +1,4 @@
-import { fetchText } from "./lib/fetchText.js";
+import { fetchWithTimeout } from "./lib/fetchWithTimeout.js";
 import { getCached, putCached } from "./lib/dbCache.js";
 
 const OC_CACHE_TTL_DAYS = 30;
@@ -16,7 +16,7 @@ export async function openCorporatesSearch(companyName) {
   try {
     const q = encodeURIComponent(companyName);
     const url = `https://api.opencorporates.com/v0.4/companies/search?q=${q}&inactive=false`;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" }, timeout: 15000 });
     if (!res.ok) {
       putCached(cacheKey, "oc", false, null);
       return null;

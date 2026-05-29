@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "../lib/fetchWithTimeout.js";
+
 function parseJsonFromText(text) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -12,12 +14,13 @@ export function openaiClassifier(env) {
   return {
     name: "openai",
     async classify({ homepageText, companyName }) {
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${env.OPENAI_API_KEY}`,
           "Content-Type": "application/json",
         },
+        timeout: 30000,
         body: JSON.stringify({
           model: env.OPENAI_MODEL || "gpt-4o-mini",
           temperature: 0.2,

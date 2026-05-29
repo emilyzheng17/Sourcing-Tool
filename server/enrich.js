@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { fetchWithTimeout } from "./lib/fetchWithTimeout.js";
 import { fetchText } from "./lib/fetchText.js";
 import { normalizeDomain, isLikelyCompanyDomain, isDirectoryListingHost } from "./lib/domains.js";
 import { openCorporatesSearch } from "./openCorporates.js";
@@ -331,8 +332,9 @@ async function fetchOwnershipSearchSnippets(name, env) {
   if (env.BRAVE_API_KEY) {
     try {
       const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
+        timeout: 15000,
       });
       if (res.ok) {
         const data = await res.json();
@@ -347,10 +349,11 @@ async function fetchOwnershipSearchSnippets(name, env) {
 
   if (env.SERPER_API_KEY && !snippets.length) {
     try {
-      const res = await fetch("https://google.serper.dev/search", {
+      const res = await fetchWithTimeout("https://google.serper.dev/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-KEY": env.SERPER_API_KEY },
         body: JSON.stringify({ q, num: 5 }),
+        timeout: 15000,
       });
       if (res.ok) {
         const data = await res.json();
@@ -515,8 +518,9 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
         } else {
           const q = `"${resolved.name}" acquired OR "private equity"`;
           const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
-          const res = await fetch(url, {
+          const res = await fetchWithTimeout(url, {
             headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
+            timeout: 15000,
           });
           if (res.ok) {
             const data = await res.json();

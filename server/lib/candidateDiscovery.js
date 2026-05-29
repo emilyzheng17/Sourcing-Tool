@@ -9,6 +9,8 @@ import {
   isLikelyCompanyDomain,
   isDirectoryListingHost,
 } from "./domains.js";
+import { createApiCallBudgets } from "./apiCallBudget.js";
+import { generateDiscoveryQueries } from "./llmQueryGen.js";
 
 const MAX_MERGE_CAP = 5000;
 
@@ -134,10 +136,38 @@ export async function discoverMergedCandidatesStreaming(
   const verticalContexts = brief.selectedVerticals?.length > 0 ? brief.selectedVerticals : [null];
 
   let timedOut = false;
+  let capReached = false;
   const deduped = new Map();
   /** @type {Record<string, number>} */
   const bucketTotals = {};
   const queuedKeys = new Set();
+  const directoryRanForProduct = new Set();
+
+  const llmQueries = await generateDiscoveryQueries(brief, env, emitFn);
+  let discoveryBrief = brief;
+  if (llmQueries) {
+    discoveryBrief = {
+      ...brief,
+      additionalSearchQueries: [
+        ...new Set([
+          ...(brief.additionalSearchQueries || []),
+          ...llmQueries.searchQueries,
+        ]),
+      ],
+      recommendationExaQueries: [
+        ...new Set([
+          ...(brief.recommendationExaQueries || []),
+          ...llmQueries.exaQueries,
+        ]),
+      ],
+    };
+  }
+
+  const apiBudgets = createApiCallBudgets(discoveryBrief);
+  const discoveryFetchOpts = {
+    ...(fetchOpts || {}),
+    apiBudgets,
+  };
 
   function tryEnqueueForKey(key) {
     if (!onEligibleCandidate) return;
@@ -165,6 +195,10 @@ export async function discoverMergedCandidatesStreaming(
       timedOut = true;
       break;
     }
+    if (queuedKeys.size >= maxCompanies) {
+      capReached = true;
+      break;
+    }
     const verticalLabel = vctx == null ? "broad" : vctx;
     const selectedVerticalsForPass = vctx == null ? [] : [vctx];
 
@@ -173,20 +207,35 @@ export async function discoverMergedCandidatesStreaming(
         timedOut = true;
         break;
       }
+      if (queuedKeys.size >= maxCompanies) {
+        capReached = true;
+        break;
+      }
+
+      const activeProduct = product ?? discoveryBrief.activeProduct ?? "B2B software";
+      const productKey = String(activeProduct);
+      const skipDirectorySources = directoryRanForProduct.has(productKey);
+
       const subBrief = {
-        ...brief,
-        activeProduct: product ?? brief.activeProduct ?? "B2B software",
-        selectedTags: tagsForProduct(brief, product),
+        ...discoveryBrief,
+        activeProduct,
+        selectedTags: tagsForProduct(discoveryBrief, product),
         selectedVerticals: selectedVerticalsForPass,
       };
       emitFn({
         type: "log",
-        message: `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
+        message: skipDirectorySources
+          ? `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — paid search + PE (directories skipped, already ran for product)`
+          : `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
       });
 
       /** @type {Record<string, number>} */
       const passBucketTotals = {};
-      await fanOutSourcesIncremental(subBrief, env, fetchOpts, (sourceKey, arr) => {
+      await fanOutSourcesIncremental(
+        subBrief,
+        env,
+        { ...discoveryFetchOpts, skipDirectorySources },
+        (sourceKey, arr) => {
         const n = arr?.length || 0;
         passBucketTotals[sourceKey] = n;
         bucketTotals[sourceKey] = (bucketTotals[sourceKey] ?? 0) + n;
@@ -195,17 +244,33 @@ export async function discoverMergedCandidatesStreaming(
           type: "log",
           message: `Source ready [${verticalLabel}] (${product ?? "broad"}) ${sourceKey}: ${n}`,
         });
-      });
+      },
+      );
       emitFn({
         type: "log",
         message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(passBucketTotals)}`,
       });
+
+      if (!skipDirectorySources) {
+        directoryRanForProduct.add(productKey);
+      }
     }
+  }
+
+  if (capReached) {
+    emitFn({
+      type: "log",
+      message: `Discovery stopped early: ${queuedKeys.size} candidates queued (cap ${maxCompanies})`,
+    });
   }
 
   emitFn({
     type: "log",
     message: `Sources raw aggregated (all passes, pre-dedupe): ${JSON.stringify(bucketTotals)}`,
+  });
+  emitFn({
+    type: "log",
+    message: `API budget remaining — Apollo: ${apiBudgets.apollo.remaining}, Crunchbase: ${apiBudgets.crunchbase.remaining}`,
   });
 
   let merged = [...deduped.values()].filter((c) => passesPostMergeFilters(c, exclude));

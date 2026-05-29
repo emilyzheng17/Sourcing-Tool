@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "./fetchWithTimeout.js";
+
 /**
  * Native Ollama HTTP helpers. Some installs return 404 on POST /api/chat
  * (older daemons or reverse proxies); POST /api/generate is the stable fallback.
@@ -30,9 +32,10 @@ function formatOllamaHttpError(res, body) {
  * @returns {Promise<string>} model text (JSON or prose to parse downstream)
  */
 export async function ollamaChatOrGenerate(base, model, userContent) {
-  const chatRes = await fetch(`${base}/api/chat`, {
+  const chatRes = await fetchWithTimeout(`${base}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    timeout: 60000,
     body: JSON.stringify({
       model,
       stream: false,
@@ -50,9 +53,10 @@ export async function ollamaChatOrGenerate(base, model, userContent) {
     throw new Error(formatOllamaHttpError(chatRes, chatBody));
   }
 
-  const genRes = await fetch(`${base}/api/generate`, {
+  const genRes = await fetchWithTimeout(`${base}/api/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    timeout: 60000,
     body: JSON.stringify({
       model,
       prompt: userContent,

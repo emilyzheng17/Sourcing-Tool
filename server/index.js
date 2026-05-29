@@ -13,6 +13,7 @@ import {
   getCompanyById,
   setRejected,
   bulkRejectIds,
+  bulkSaveAboveScore,
   bulkRestoreRejectedIds,
   listActiveCompanySimilarityStubs,
   getCompaniesByIds,
@@ -279,6 +280,16 @@ app.post("/api/companies/bulk-restore", (req, res) => {
   }
   const restoredCount = bulkRestoreRejectedIds(ids);
   res.json({ ok: true, restoredCount });
+});
+
+app.post("/api/companies/bulk-save-above-score", (req, res) => {
+  const minScore = Number(req.body?.minScore);
+  if (Number.isNaN(minScore) || minScore < 0 || minScore > 100) {
+    res.status(400).json({ error: "minScore must be 0-100" });
+    return;
+  }
+  const savedCount = bulkSaveAboveScore(minScore);
+  res.json({ savedCount });
 });
 
 app.post("/api/companies/:id/save", (req, res) => {

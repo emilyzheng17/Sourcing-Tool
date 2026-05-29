@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "../lib/fetchWithTimeout.js";
+
 function parseJsonFromText(text) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -12,13 +14,14 @@ export function anthropicClassifier(env) {
   return {
     name: "anthropic",
     async classify({ homepageText, companyName }) {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-api-key": env.ANTHROPIC_API_KEY,
           "anthropic-version": "2023-06-01",
         },
+        timeout: 30000,
         body: JSON.stringify({
           model: env.ANTHROPIC_MODEL || "claude-3-5-haiku-20241022",
           max_tokens: 512,

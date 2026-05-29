@@ -76,9 +76,13 @@ function mapOrganizations(orgs) {
 
 /**
  * Apollo.io organization search — multi-page per keyword variant.
+ * @param {object} brief
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ apiBudgets?: { apollo?: { tryConsume: (n?: number) => boolean } } }} [fetchOpts]
  */
-export async function searchApollo(brief, env) {
+export async function searchApollo(brief, env, fetchOpts = {}) {
   if (!env.APOLLO_API_KEY) return [];
+  const budget = fetchOpts?.apiBudgets?.apollo;
   const m = breadthMultiplier(brief);
   const perPage = Math.min(100, 25 * m);
   const maxPagesCfg = parseInt(String(env.APOLLO_MAX_PAGES || "12"), 10);
@@ -91,6 +95,7 @@ export async function searchApollo(brief, env) {
   try {
     for (const q_organization_keyword_tags of variants) {
       for (let page = 1; page <= maxPages; page++) {
+        if (budget && !budget.tryConsume(1)) return [...byDomain.values()];
         const res = await fetch("https://api.apollo.io/v1/organizations/search", {
           method: "POST",
           headers: {

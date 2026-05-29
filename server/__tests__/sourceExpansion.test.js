@@ -11,6 +11,7 @@ import { testParseAlternativeToListings } from "../sources/alternativeTo.js";
 import { extractMarketplaceLinks } from "../sources/marketplacePages.js";
 import { pathsForProduct, SOFTWARE_ADVICE_PATHS } from "../lib/productCategoryPaths.js";
 import { testParseSerperResults } from "../sources/serper.js";
+import { testParseExaResults } from "../sources/exa.js";
 
 test("PE firm seed list includes planned expansion firms", () => {
   const ids = new Set(PE_FIRMS.map((f) => f.id));
@@ -106,6 +107,28 @@ test("Serper parser extracts organic result links", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].website, "https://www.acmefleet.com/");
   assert.equal(rows[0].sourceTag, "Serper");
+});
+
+test("testParseExaResults maps Exa API results to discovery candidates", () => {
+  const data = {
+    results: [
+      {
+        id: "exa-1",
+        url: "https://www.acmefleet.com/products",
+        title: "Acme Fleet Software",
+      },
+      {
+        id: "exa-2",
+        url: "https://www.facebook.com/acme",
+        title: "Acme on Facebook",
+      },
+    ],
+  };
+  const rows = testParseExaResults(data, "fleet management software");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].website, "https://www.acmefleet.com/products");
+  assert.equal(rows[0].sourceTag, "Exa");
+  assert.equal(rows[0].rawMetadata.exaQuery, "fleet management software");
 });
 
 test("marketplace link harvest skips marketplace host", () => {

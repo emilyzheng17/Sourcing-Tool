@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "../lib/fetchWithTimeout.js";
+
 function parseJsonFromText(text) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -14,9 +16,10 @@ export function geminiClassifier(env) {
     async classify({ homepageText, companyName }) {
       const model = env.GEMINI_MODEL || "gemini-1.5-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        timeout: 30000,
         body: JSON.stringify({
           contents: [
             {

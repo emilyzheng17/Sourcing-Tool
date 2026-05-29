@@ -19,17 +19,31 @@ import { searchMarketplacePages } from "./marketplacePages.js";
 import { searchTavily } from "./tavily.js";
 import { searchHighRiskSources } from "./highRisk/index.js";
 
+/** Directory listing scrapers — keyed by product slug, not vertical; safe to skip on repeat passes. */
+export const DIRECTORY_SOURCE_KEYS = new Set([
+  "g2",
+  "capterra",
+  "getapp",
+  "trustradius",
+  "softwareadvice",
+  "sourceforge",
+  "slashdot",
+  "saashub",
+  "alternativeto",
+]);
+
 /**
  * Run all source adapters in parallel; invoke onSourceResult as each settles (incremental TTFR upstream).
  * @param {object} brief
  * @param {NodeJS.ProcessEnv} env
- * @param {{ cache?: Map, jitterHostState?: Map }} [fetchOpts]
+ * @param {{ cache?: Map, jitterHostState?: Map, apiBudgets?: object, skipDirectorySources?: boolean }} [fetchOpts]
  * @param {(sourceKey: string, candidates: object[]) => void} onSourceResult
  * @returns {Promise<void>}
  */
 export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceResult) {
   const fo = fetchOpts || {};
   const procEnv = env || process.env;
+  const skipDirs = !!fo.skipDirectorySources;
 
   const settle = (sourceKey, p) =>
     Promise.resolve(p)
@@ -41,28 +55,35 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
         onSourceResult(sourceKey, []);
       });
 
-  await Promise.all([
+  const tasks = [
     settle("pe", searchPePortfolios(brief, fo)),
     settle("rollup", searchRollupPages(brief, fo)),
     settle("assoc", searchTradeAssocs(brief, fo)),
-    settle("g2", searchG2(brief, fo)),
-    settle("capterra", searchCapterra(brief, fo)),
-    settle("getapp", searchGetApp(brief, fo)),
     settle("brave", searchBrave(brief, env)),
     settle("serper", searchSerper(brief, env)),
     settle("exa", searchExa(brief, env)),
-    settle("apollo", searchApollo(brief, env)),
-    settle("crunchbase", searchCrunchbase(brief, env)),
-    settle("trustradius", searchTrustRadius(brief, fo)),
-    settle("softwareadvice", searchSoftwareAdvice(brief, fo)),
-    settle("sourceforge", searchSourceForge(brief, fo)),
-    settle("slashdot", searchSlashdot(brief, fo)),
-    settle("saashub", searchSaaSHub(brief, fo)),
-    settle("alternativeto", searchAlternativeTo(brief, fo)),
+    settle("apollo", searchApollo(brief, env, fo)),
+    settle("crunchbase", searchCrunchbase(brief, env, fo)),
     settle("marketplace", searchMarketplacePages(brief, fo)),
     settle("tavily", searchTavily(brief, procEnv)),
     settle("highRisk", searchHighRiskSources(brief, procEnv)),
-  ]);
+  ];
+
+  if (!skipDirs) {
+    tasks.push(
+      settle("g2", searchG2(brief, fo)),
+      settle("capterra", searchCapterra(brief, fo)),
+      settle("getapp", searchGetApp(brief, fo)),
+      settle("trustradius", searchTrustRadius(brief, fo)),
+      settle("softwareadvice", searchSoftwareAdvice(brief, fo)),
+      settle("sourceforge", searchSourceForge(brief, fo)),
+      settle("slashdot", searchSlashdot(brief, fo)),
+      settle("saashub", searchSaaSHub(brief, fo)),
+      settle("alternativeto", searchAlternativeTo(brief, fo)),
+    );
+  }
+
+  await Promise.all(tasks);
 }
 
 /**

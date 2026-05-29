@@ -137,9 +137,15 @@ function mapEntities(data) {
   });
 }
 
-/** Crunchbase v4 — paginated + multi-variant queries */
-export async function searchCrunchbase(brief, env) {
+/**
+ * Crunchbase v4 — paginated + multi-variant queries.
+ * @param {object} brief
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ apiBudgets?: { crunchbase?: { tryConsume: (n?: number) => boolean } } }} [fetchOpts]
+ */
+export async function searchCrunchbase(brief, env, fetchOpts = {}) {
   if (!env.CRUNCHBASE_API_KEY) return [];
+  const budget = fetchOpts?.apiBudgets?.crunchbase;
   const m = breadthMultiplier(brief);
   const limit = Math.min(100, Math.max(24, Math.round(20 * m)));
   const pagesCfg = parseInt(String(env.CRUNCHBASE_MAX_PAGES_PER_VARIANT || "8"), 10);
@@ -153,6 +159,7 @@ export async function searchCrunchbase(brief, env) {
     for (const variant of variants) {
       let afterId = null;
       for (let pg = 0; pg < maxPages; pg++) {
+        if (budget && !budget.tryConsume(1)) return [...byKey.values()];
         const data = await fetchOrgSearch(env, variant, limit, afterId);
         if (!data?.entities?.length) break;
 
