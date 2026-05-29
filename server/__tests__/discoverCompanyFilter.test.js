@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   companyOwnershipMatchesFilter,
   companyPassesDiscoverFilters,
+  matchesCompanyTypeFilter,
 } from "../../shared/discoverCompanyFilter.js";
 import { VERTICAL_MATCH_THRESHOLD } from "../../shared/verticalFitConstants.js";
 
@@ -146,4 +147,37 @@ test("selected tags require overlap with company.tags snapshot", () => {
   assert.ok(
     !companyPassesDiscoverFilters(c, { ...baseCriteria, selectedTags: ["Only Other"] }),
   );
+});
+
+test("matchesCompanyTypeFilter: Any Type passes all", () => {
+  for (const t of ["software", "hardware", "hybrid", "unknown"]) {
+    assert.ok(matchesCompanyTypeFilter({ companyType: t }, "Any Type"));
+  }
+});
+
+test("matchesCompanyTypeFilter: Software includes software and unknown", () => {
+  assert.ok(matchesCompanyTypeFilter({ companyType: "software" }, "Software"));
+  assert.ok(matchesCompanyTypeFilter({ companyType: "unknown" }, "Software"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "hardware" }, "Software"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "hybrid" }, "Software"));
+});
+
+test("matchesCompanyTypeFilter: Hardware includes hardware and hybrid", () => {
+  assert.ok(matchesCompanyTypeFilter({ companyType: "hardware" }, "Hardware"));
+  assert.ok(matchesCompanyTypeFilter({ companyType: "hybrid" }, "Hardware"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "software" }, "Hardware"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "unknown" }, "Hardware"));
+});
+
+test("matchesCompanyTypeFilter: Hybrid is exact match only", () => {
+  assert.ok(matchesCompanyTypeFilter({ companyType: "hybrid" }, "Hybrid"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "software" }, "Hybrid"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "hardware" }, "Hybrid"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "unknown" }, "Hybrid"));
+});
+
+test("matchesCompanyTypeFilter: Unknown is exact match only", () => {
+  assert.ok(matchesCompanyTypeFilter({ companyType: "unknown" }, "Unknown"));
+  assert.ok(matchesCompanyTypeFilter({}, "Unknown"));
+  assert.ok(!matchesCompanyTypeFilter({ companyType: "software" }, "Unknown"));
 });

@@ -71,11 +71,12 @@ function finishBuildComplete(jobId, jobState, emitAll) {
  * @param {number}   config.stageBThreshold - min priority_score to promote to Stage B
  * @param {boolean}  config.useOllama
  * @param {string}   config.breadth         - "focused" | "broad" | "exhaustive"
+ * @param {string}   [config.companyTypeFilter] - "Any Type" | "Software" | "Hardware" | "Hybrid" | "Unknown"; enforced after Stage B
  * @param {NodeJS.ProcessEnv} env
  * @param {(evt: object) => void} emit
+ * @param {string} [jobId]
  */
-export async function startUniverseBuild(config, env, emit) {
-  const jobId = randomUUID();
+export async function startUniverseBuild(config, env, emit, jobId = randomUUID()) {
   const depth = config.depth || "standard";
   const stageBThreshold = config.stageBThreshold ?? (depth === "deep" ? 55 : 40);
   const useOllama = !!(config.useOllama && depth === "deep");
@@ -110,16 +111,12 @@ export async function startUniverseBuild(config, env, emit) {
     stats,
     deadline,
     finished: false,
-    subscribers: new Set(),
     abortController: new AbortController(),
   };
   activeJobs.set(jobId, jobState);
 
   const emitAll = (evt) => {
     try { emit(evt); } catch { /* */ }
-    for (const fn of jobState.subscribers) {
-      try { fn(evt); } catch { /* */ }
-    }
   };
 
   emitAll({ type: "build:started", jobId });

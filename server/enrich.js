@@ -4,8 +4,8 @@ import { normalizeDomain, isLikelyCompanyDomain, isDirectoryListingHost } from "
 import { openCorporatesSearch } from "./openCorporates.js";
 import { extractOrganizationSignals } from "./lib/schemaOrgSignals.js";
 import { tryFetchAtsSignals } from "./lib/atsPublic.js";
-import { visibleTextFromHtml, sanitizeScrapedPlainText } from "./lib/visiblePageText.js";
-import { buildVerticalFitCorpus, evaluateVerticalFit } from "./lib/verticalFit.js";
+import { visibleTextFromHtml, sanitizeScrapedPlainText, pickBestOverview } from "./lib/visiblePageText.js";
+import { buildVerticalFitCorpus, evaluateVerticalFit, pickEnrichListVerticals, KNOWN_VERTICALS } from "./lib/verticalFit.js";
 import { evaluateProductFit } from "./lib/productFit.js";
 import { isPublicListingCandidate } from "./lib/publicCompanySignals.js";
 import { markPublicCompanyExcluded } from "./db.js";
@@ -240,7 +240,8 @@ function employeesTextFromBody(text) {
  * Returns { resolved, domain, base, title, homepageHtml, homepageText, headers, cheapScore, metaDescription }
  * for Stage B to continue with.
  */
-export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {}) {
+export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {}, stageOpts = {}) {
+  const { skipFilter = false } = stageOpts;
   const threshold = parseInt(env?.PRESCORE_THRESHOLD, 10) || DEFAULT_PRESCORE_THRESHOLD;
 
   const resolved = await resolvePublicWebsite(candidate, fetchOpts);
@@ -299,7 +300,7 @@ export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {
         },
       });
     }
-    return null;
+    if (!skipFilter) return null;
   }
 
   return {
@@ -323,9 +324,65 @@ export async function enrichCandidateStageA(candidate, brief, env, fetchOpts = {
  * Stage B: Deep enrichment for candidates that passed Stage A.
  * Sub-page crawl, OpenCorporates, Brave acquisition (gated), ATS, etc.
  */
+function isEnrichListCandidate(candidate) {
+  return (
+    candidate?.sourceTag === "EnrichList" ||
+    (Array.isArray(candidate?.sourceTags) && candidate.sourceTags.includes("EnrichList"))
+  );
+}
+
+async function fetchOwnershipSearchSnippets(name, env) {
+  const q = `"${name}" (funding OR acquired OR "private equity" OR series OR bootstrapped OR founder)`;
+  const cacheKey = `ownership-enrich:${name.toLowerCase()}`;
+  const cached = getCached(cacheKey, BRAVE_ENRICH_CACHE_TTL_DAYS);
+  if (cached?.ok && cached.payload) return cached.payload;
+
+  const snippets = [];
+
+  if (env.BRAVE_API_KEY) {
+    try {
+      const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        for (const r of data.web?.results || []) {
+          if (r.description) snippets.push(r.description);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (env.SERPER_API_KEY && !snippets.length) {
+    try {
+      const res = await fetch("https://google.serper.dev/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-KEY": env.SERPER_API_KEY },
+        body: JSON.stringify({ q, num: 5 }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        for (const r of data.organic || []) {
+          if (r.snippet) snippets.push(r.snippet);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const text = snippets.join(" \n ");
+  putCached(cacheKey, "ownership-enrich", !!text, text || null);
+  return text;
+}
+
 export async function enrichCandidateStageB(candidate, stageA, brief, env, fetchOpts = {}) {
   const acquisitionThreshold =
     parseInt(env?.ACQUISITION_SCORE_THRESHOLD, 10) || DEFAULT_ACQUISITION_SCORE_THRESHOLD;
+  const isEnrichList = isEnrichListCandidate(candidate);
 
   const { resolved, domain, base, homepageHtml, headers: stageAHeaders, homepageFetched, cheapScore } = stageA;
   let { title, homepageText } = stageA;
@@ -357,7 +414,8 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   if (!homepageFetched) {
     pages.add(base);
   }
-  for (const p of EXTRA_PATHS) {
+  const extraPaths = isEnrichList ? ["/about", ...EXTRA_PATHS] : EXTRA_PATHS;
+  for (const p of extraPaths) {
     pages.add(joinUrl(base, p));
   }
 
@@ -450,29 +508,34 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   }
 
   let braveSnippet = "";
-  if (env.BRAVE_API_KEY && cheapScore >= acquisitionThreshold) {
+  const runOwnershipSearch = isEnrichList || (env.BRAVE_API_KEY && cheapScore >= acquisitionThreshold);
+  if (runOwnershipSearch && (env.BRAVE_API_KEY || env.SERPER_API_KEY)) {
     try {
-      const braveEnrichKey = `brave-enrich:${resolved.name}`;
-      const cachedBrave = getCached(braveEnrichKey, BRAVE_ENRICH_CACHE_TTL_DAYS);
-      let results;
-      if (cachedBrave) {
-        results = cachedBrave.ok ? (cachedBrave.payload || []) : [];
-      } else {
-        const q = `"${resolved.name}" acquired OR "private equity"`;
-        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
-        const res = await fetch(url, {
-          headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          results = data.web?.results || [];
-          putCached(braveEnrichKey, "brave-enrich", true, results);
+      if (isEnrichList) {
+        braveSnippet = await fetchOwnershipSearchSnippets(resolved.name, env);
+      } else if (env.BRAVE_API_KEY) {
+        const braveEnrichKey = `brave-enrich:${resolved.name}`;
+        const cachedBrave = getCached(braveEnrichKey, BRAVE_ENRICH_CACHE_TTL_DAYS);
+        let results;
+        if (cachedBrave) {
+          results = cachedBrave.ok ? (cachedBrave.payload || []) : [];
         } else {
-          putCached(braveEnrichKey, "brave-enrich", false, null);
-          results = [];
+          const q = `"${resolved.name}" acquired OR "private equity"`;
+          const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=5`;
+          const res = await fetch(url, {
+            headers: { Accept: "application/json", "X-Subscription-Token": env.BRAVE_API_KEY },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            results = data.web?.results || [];
+            putCached(braveEnrichKey, "brave-enrich", true, results);
+          } else {
+            putCached(braveEnrichKey, "brave-enrich", false, null);
+            results = [];
+          }
         }
+        braveSnippet = results.map((r) => r.description || "").join(" \n ");
       }
-      braveSnippet = results.map((r) => r.description || "").join(" \n ");
       if (braveSnippet) {
         const acq = extractAcquisition(braveSnippet + " " + combinedText);
         if (acq.year && !acquisitionHistory.some((a) => a.year === acq.year))
@@ -512,7 +575,15 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   const provisionalLabel =
     (candidateProducts.length && candidateProducts.join(" · ")) || brief.activeProduct || "Software";
 
-  let desc = buildDescription(combinedText, resolved.name, provisionalLabel);
+  let desc = isEnrichList
+    ? pickBestOverview({
+        name: resolved.name,
+        homepageMetaDescription: structured.metaDescription,
+        homepageTextSample: combinedText.slice(0, 4000),
+        combinedText,
+        productLabel: provisionalLabel,
+      })
+    : buildDescription(combinedText, resolved.name, provisionalLabel);
   const homepageSample = combinedText.slice(0, 4000);
   const selectedVerts = Array.isArray(brief.selectedVerticals) ? brief.selectedVerticals : [];
   const fitCorpus = buildVerticalFitCorpus({
@@ -522,7 +593,14 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     homepageMetaDescription: structured.metaDescription,
     rawMetadata: resolved.rawMetadata,
   });
-  const fit = evaluateVerticalFit(selectedVerts, fitCorpus, resolved.rawMetadata?.apolloIndustry);
+  const fit = evaluateVerticalFit(
+    isEnrichList ? KNOWN_VERTICALS : selectedVerts,
+    fitCorpus,
+    resolved.rawMetadata?.apolloIndustry,
+  );
+  const enrichListVerticals = isEnrichList
+    ? pickEnrichListVerticals(resolved.name, fitCorpus, resolved.rawMetadata?.apolloIndustry)
+    : null;
 
   const selectedProds = Array.isArray(brief.selectedProducts) ? brief.selectedProducts : [];
   const productFit = evaluateProductFit(selectedProds, candidateProducts, fitCorpus, resolved.rawMetadata?.apolloIndustry);
@@ -531,7 +609,15 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   const productLabel =
     verifiedProducts.length > 0 ? verifiedProducts.join(" · ") : brief.activeProduct || "Software";
   if (productLabel !== provisionalLabel) {
-    desc = buildDescription(combinedText, resolved.name, productLabel);
+    desc = isEnrichList
+      ? pickBestOverview({
+          name: resolved.name,
+          homepageMetaDescription: structured.metaDescription,
+          homepageTextSample: homepageSample,
+          combinedText,
+          productLabel,
+        })
+      : buildDescription(combinedText, resolved.name, productLabel);
   }
 
   return {
@@ -551,7 +637,7 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     atsOpenRoles: atsSignals?.openRoles ?? null,
     atsProvider: atsSignals?.provider ?? null,
     searchVerticals: selectedVerts.length ? [...selectedVerts] : [],
-    verticals: fit.matchedVerticals,
+    verticals: enrichListVerticals ?? fit.matchedVerticals,
     verticalFitScore: fit.verticalFitScore,
     verticalFitReasons: fit.verticalFitReasons,
     products,

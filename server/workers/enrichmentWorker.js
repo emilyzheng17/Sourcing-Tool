@@ -8,6 +8,7 @@
 
 import { enrichCandidateStageA, enrichCandidateStageB } from "../enrich.js";
 import { startWorkerLoop } from "../lib/workerLoop.js";
+import { matchesCompanyTypeFilter } from "../../shared/discoverCompanyFilter.js";
 import {
   claimEnrichmentJobs,
   completeEnrichmentJob,
@@ -17,6 +18,7 @@ import {
   insertCompanyEvent,
   getCompanyById,
   upsertCompany,
+  setRejected,
   getDb,
 } from "../db.js";
 
@@ -133,6 +135,40 @@ export function startEnrichmentWorker(jobId, config, env, emit, onDeadline) {
           completeEnrichmentJob(job.id);
         })();
         emit({ type: "skipped", domain: job.domain, companyId });
+        return;
+      }
+
+      const companyTypeFilter = config.companyTypeFilter || "Any Type";
+      const typeMismatch =
+        companyTypeFilter !== "Any Type" && !matchesCompanyTypeFilter(enriched, companyTypeFilter);
+
+      if (typeMismatch) {
+        getDb().transaction(() => {
+          upsertCompany({
+            domain: enriched.domain,
+            name: enriched.name,
+            website: enriched.website,
+            data: enriched,
+          });
+
+          setRejected(companyId, true);
+          updateCompanyStatus(companyId, "FULLY_ENRICHED", {
+            last_enriched_at: new Date().toISOString(),
+          });
+
+          completeEnrichmentJob(job.id);
+          insertCompanyEvent(companyId, "TYPE_FILTER_REJECTED", {
+            companyType: enriched.companyType,
+            filter: companyTypeFilter,
+          });
+        })();
+
+        emit({
+          type: "skipped",
+          domain: enriched.domain,
+          companyId,
+          reason: "company_type_filter",
+        });
         return;
       }
 

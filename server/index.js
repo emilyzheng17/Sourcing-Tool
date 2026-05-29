@@ -27,10 +27,16 @@ import {
   pauseBuild,
   resumeBuild,
   stopBuild,
-  getActiveJob,
 } from "./overnightPipeline.js";
-import { getBuildJob, listBuildJobs } from "./db.js";
+import { getBuildJob, listBuildJobs, reconcileStaleBuildJobs } from "./db.js";
 import { linkedInExportStatus } from "./lib/highTosEnv.js";
+import { runEnrichListJob } from "./enrichByName.js";
+import {
+  createEnrichListJob,
+  enrichListSubscribe,
+  deriveEnrichListSnapshot,
+  runEnrichListJobTracked,
+} from "./enrichListJobs.js";
 
 // Undici's fetch() attaches several internal listeners per in-flight request. The search
 // pipeline runs many concurrent fetches (see pipeline.js p-limit); default limit is 10.
@@ -42,6 +48,7 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 const jobs = new Map();
+const enrichListJobs = new Map();
 // #endregion
 
 // #region Health & settings
@@ -122,6 +129,60 @@ app.get("/api/search/:jobId/stream", (req, res) => {
   req.on("close", () => {
     job.subscribers.delete(listener);
   });
+});
+// #endregion
+
+// #region Enrich list (uploaded spreadsheet)
+app.post("/api/enrich-list", (req, res) => {
+  const body = req.body || {};
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (!rows.length) {
+    res.status(400).json({ ok: false, message: "Provide a non-empty rows array" });
+    return;
+  }
+  if (rows.length > 500) {
+    res.status(400).json({ ok: false, message: "Maximum 500 rows per job" });
+    return;
+  }
+
+  const jobId = randomUUID();
+  const options = body.options && typeof body.options === "object" ? body.options : {};
+  enrichListJobs.set(jobId, createEnrichListJob(rows, options));
+  res.json({ jobId });
+});
+
+app.get("/api/enrich-list/:jobId", (req, res) => {
+  const job = enrichListJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ ok: false, message: "Enrich job not found" });
+    return;
+  }
+  res.json({ ok: true, jobId: req.params.jobId, ...deriveEnrichListSnapshot(job) });
+});
+
+app.get("/api/enrich-list/:jobId/stream", (req, res) => {
+  const jobId = req.params.jobId;
+  const job = enrichListJobs.get(jobId);
+  if (!job) {
+    res.status(404).end();
+    return;
+  }
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (evt) => {
+    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+  };
+
+  const unsubscribe = enrichListSubscribe(job, send);
+
+  if (!job.started) {
+    runEnrichListJobTracked(job, process.env, runEnrichListJob);
+  }
+
+  req.on("close", unsubscribe);
 });
 // #endregion
 
@@ -309,31 +370,27 @@ app.post("/api/universe/similar-to-rejected", (req, res) => {
 
 const buildJobs = new Map();
 
-app.post("/api/universe/build", async (req, res) => {
+app.post("/api/universe/build", (req, res) => {
   try {
     const config = req.body || {};
-    buildJobs.set("_pending", { subscribers: new Set() });
+    const jobId = randomUUID();
+    buildJobs.set(jobId, { subscribers: new Set() });
 
-    const jobId = await startUniverseBuild(config, process.env, (evt) => {
-      const entry = buildJobs.get(jobId) || buildJobs.get("_pending");
+    const emit = (evt) => {
+      const entry = buildJobs.get(jobId);
       if (!entry) return;
       for (const fn of entry.subscribers) {
         try { fn(evt); } catch { /* */ }
       }
-    });
-
-    const pending = buildJobs.get("_pending");
-    buildJobs.delete("_pending");
-    buildJobs.set(jobId, {
-      subscribers: pending?.subscribers || new Set(),
-    });
-
-    const active = getActiveJob(jobId);
-    if (active) {
-      active.subscribers = buildJobs.get(jobId).subscribers;
-    }
+    };
 
     res.json({ jobId });
+
+    setTimeout(() => {
+      startUniverseBuild(config, process.env, emit, jobId).catch((e) => {
+        emit({ type: "build:error", message: e.message || String(e) });
+      });
+    }, 0);
   } catch (e) {
     res.status(500).json({ ok: false, message: e.message || String(e) });
   }
@@ -354,14 +411,15 @@ app.get("/api/universe/build/:jobId", (req, res) => {
 
 app.get("/api/universe/build/:jobId/stream", (req, res) => {
   const jobId = req.params.jobId;
+  const dbJob = getBuildJob(jobId);
+  if (!buildJobs.get(jobId) && !dbJob) {
+    res.status(404).end();
+    return;
+  }
+
   let entry = buildJobs.get(jobId);
   if (!entry) {
-    const active = getActiveJob(jobId);
-    if (!active) {
-      res.status(404).end();
-      return;
-    }
-    entry = { subscribers: active.subscribers || new Set() };
+    entry = { subscribers: new Set() };
     buildJobs.set(jobId, entry);
   }
 
@@ -373,6 +431,13 @@ app.get("/api/universe/build/:jobId/stream", (req, res) => {
   const send = (evt) => {
     res.write(`data: ${JSON.stringify(evt)}\n\n`);
   };
+
+  if (dbJob) {
+    let stats = {};
+    try { stats = JSON.parse(dbJob.stats || "{}"); } catch { /* */ }
+    send({ type: "build:snapshot", status: dbJob.status, ...stats });
+  }
+
   entry.subscribers.add(send);
   req.on("close", () => {
     entry.subscribers.delete(send);
@@ -407,6 +472,7 @@ app.get("/api/universe/builds", (_req, res) => {
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
+reconcileStaleBuildJobs();
 app.listen(PORT, () => {
   console.log(`Sourcing API http://127.0.0.1:${PORT}`);
 });

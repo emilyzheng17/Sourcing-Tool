@@ -331,6 +331,50 @@ export function evaluateVerticalFit(selectedVerticals, corpusLower, apolloIndust
   };
 }
 
+export const ENRICH_LIST_VERTICAL_MIN = 50;
+export const ENRICH_LIST_TOP2_GAP = 10;
+
+/**
+ * Enrich-list vertical policy: top 1 (or top 2 if close), stricter threshold, mining name guard.
+ * @param {string} companyName
+ * @param {string} corpusLower
+ * @param {string} [apolloIndustry]
+ * @returns {string[]}
+ */
+export function pickEnrichListVerticals(companyName, corpusLower, apolloIndustry) {
+  const fit = evaluateVerticalFit(KNOWN_VERTICALS, corpusLower, apolloIndustry);
+  const entries = Object.entries(fit.verticalFitByVertical || {})
+    .map(([vertical, r]) => ({
+      vertical,
+      score: r.score,
+      matchedHints: r.matchedHints || [],
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const nameLower = sanitizeCorpus(companyName);
+  const hasMineInName = /\b(?:mine|mining)\b/i.test(nameLower);
+
+  const filtered = entries.filter((e) => {
+    if (e.score < ENRICH_LIST_VERTICAL_MIN) return false;
+    if (e.vertical === "Metals & Mining" && hasMineInName && e.matchedHints.length < 2) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) return [];
+
+  const out = [filtered[0].vertical];
+  if (
+    filtered[1] &&
+    filtered[1].score >= ENRICH_LIST_VERTICAL_MIN &&
+    filtered[0].score - filtered[1].score <= ENRICH_LIST_TOP2_GAP
+  ) {
+    out.push(filtered[1].vertical);
+  }
+  return out;
+}
+
 /**
  * Map 0–100 fit to thesis vertScore bucket 0–3 when verticals are selected.
  * @param {number} verticalFitScore

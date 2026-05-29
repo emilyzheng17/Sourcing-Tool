@@ -436,6 +436,15 @@ export function updateBuildJobStats(id, stats) {
     .run(JSON.stringify(stats), id);
 }
 
+export function reconcileStaleBuildJobs() {
+  return getDb()
+    .prepare(
+      `UPDATE build_jobs SET status = 'STOPPED', updated_at = datetime('now')
+       WHERE status IN ('RUNNING', 'PAUSED')`
+    )
+    .run().changes;
+}
+
 export function upsertDiscoveredCompany({ domain, name, website, batchId, priorityScore }) {
   const d = getDb();
   const row = d.prepare(

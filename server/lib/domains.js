@@ -41,6 +41,9 @@ export function isLikelyCompanyDomain(domain) {
     "facebook.com",
     "instagram.com",
     "youtube.com",
+    "tiktok.com",
+    "updatestar.com",
+    "meta.com",
     "google.com",
     "g2.com",
     "capterra.com",
@@ -70,9 +73,50 @@ export function isLikelyCompanyDomain(domain) {
     "apollo.io",
     "zoominfo.com",
   ]);
-  if (blocked.has(domain) || domain.endsWith(".linkedin.com")) return false;
+  if (blocked.has(domain) || domain.endsWith(".linkedin.com") || domain.endsWith(".facebook.com")) {
+    return false;
+  }
   if (/\.(gov|edu)$/i.test(domain)) return false;
   return true;
+}
+
+/** Reject PDFs, social video pages, and other non-homepage URLs for enrich-list lookup. */
+export function isBlockedEnrichUrl(url) {
+  if (!url || typeof url !== "string") return true;
+  try {
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    const path = u.pathname.toLowerCase();
+    if (path.endsWith(".pdf")) return true;
+    if (u.hostname.includes("tiktok.com") && /\/video\//.test(path)) return true;
+    const domain = normalizeDomain(url);
+    if (!domain || !isLikelyCompanyDomain(domain)) return true;
+    const blockedHosts = ["updatestar.com", "download.cnet.com", "softonic.com", "softpedia.com"];
+    if (blockedHosts.some((h) => domain.includes(h))) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Normalize a URL to the site root (scheme + host). */
+export function normalizeToSiteRoot(url) {
+  try {
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    return `${u.protocol}//${u.host}/`;
+  } catch {
+    return url;
+  }
+}
+
+/** Count path segments (shallower is better for homepage). */
+export function urlPathDepth(url) {
+  try {
+    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    const segs = u.pathname.split("/").filter(Boolean);
+    return segs.length;
+  } catch {
+    return 99;
+  }
 }
 
 export function mergeSourceTags(a, b) {

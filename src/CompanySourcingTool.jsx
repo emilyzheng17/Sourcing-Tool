@@ -227,6 +227,7 @@ export default function CompanySourcingTool() {
   const [similarMinScore, setSimilarMinScore] = useState(0.84);
   const [selectedSimilarIds, setSelectedSimilarIds] = useState([]);
   const [bulkRejectLoading, setBulkRejectLoading] = useState(false);
+  const [deleteAllSavedLoading, setDeleteAllSavedLoading] = useState(false);
   const [restoreSelectedLoading, setRestoreSelectedLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [searchDone, setSearchDone] = useState(false);
@@ -274,6 +275,7 @@ export default function CompanySourcingTool() {
   const [buildBreadth, setBuildBreadth] = useState("exhaustive");
   const [buildVerticals, setBuildVerticals] = useState([]);
   const [buildProducts, setBuildProducts] = useState([]);
+  const [buildCompanyTypeFilter, setBuildCompanyTypeFilter] = useState("Any Type");
   const [buildJobId, setBuildJobId] = useState(null);
   const [buildStatus, setBuildStatus] = useState(null);
   const [buildStats, setBuildStats] = useState({ discovered: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
@@ -281,7 +283,26 @@ export default function CompanySourcingTool() {
   const [buildStartedAt, setBuildStartedAt] = useState(null);
   const [buildHistory, setBuildHistory] = useState([]);
   const buildEventSourceRef = useRef(null);
+  const enrichEventSourceRef = useRef(null);
+  const enrichStaleTimerRef = useRef(null);
+  const enrichFileInputRef = useRef(null);
   const mainScrollRef = useRef(null);
+
+  // Enrich List state
+  const [enrichHeaders, setEnrichHeaders] = useState([]);
+  const [enrichInputRows, setEnrichInputRows] = useState([]);
+  const [enrichOutputRows, setEnrichOutputRows] = useState({});
+  const [enrichRowStatus, setEnrichRowStatus] = useState({});
+  const [enrichJobId, setEnrichJobId] = useState(null);
+  const [enrichRunning, setEnrichRunning] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState(null);
+  const [enrichFillBlanksOnly, setEnrichFillBlanksOnly] = useState(true);
+  const [enrichUseOllama, setEnrichUseOllama] = useState(false);
+  const [enrichError, setEnrichError] = useState("");
+  const [enrichFileName, setEnrichFileName] = useState("");
+  const [enrichDragOver, setEnrichDragOver] = useState(false);
+  const [enrichAutoExportPending, setEnrichAutoExportPending] = useState(false);
+  const enrichOutputRowsRef = useRef({});
   // #endregion
 
   // #region Derived criteria
@@ -559,6 +580,28 @@ export default function CompanySourcingTool() {
   // #endregion
 
   // #region API — company mutations
+  const purgeCompaniesFromActiveViews = useCallback((ids) => {
+    const idSet = new Set(ids.map(Number).filter(Number.isFinite));
+    if (!idSet.size) return;
+    setUniverseRows((prev) => prev.filter((c) => !idSet.has(c.id)));
+    setSavedRows((prev) => prev.filter((c) => !idSet.has(c.id)));
+    setSearchResults((prev) =>
+      prev.map((c) =>
+        idSet.has(c.id) ? { ...c, is_rejected: true, is_saved: false } : c
+      )
+    );
+    setCompanyMeta((p) => {
+      const n = { ...p };
+      for (const id of idSet) delete n[id];
+      return n;
+    });
+    setSavedContactExpanded((p) => {
+      const n = { ...p };
+      for (const id of idSet) delete n[id];
+      return n;
+    });
+  }, []);
+
   const saveCompany = async (id, saved) => {
     try {
       const r = await fetch(`/api/companies/${id}/save`, {
@@ -609,14 +652,11 @@ export default function CompanySourcingTool() {
         window.alert(updated?.message || `Could not update company (HTTP ${r.status}).`);
         return;
       }
-      setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
       if (rejected) {
+        purgeCompaniesFromActiveViews([id]);
         setExpandedCompany((e) => (e === id ? null : e));
-        setCompanyMeta((p) => {
-          const n = { ...p };
-          delete n[id];
-          return n;
-        });
+      } else {
+        setSearchResults((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
       }
       loadSavedRows();
       loadUniverseRows();
@@ -668,12 +708,18 @@ export default function CompanySourcingTool() {
     if (!selectedSimilarIds.length) return;
     setBulkRejectLoading(true);
     try {
+      const ids = [...selectedSimilarIds];
       const r = await fetch("/api/companies/bulk-reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: selectedSimilarIds }),
+        body: JSON.stringify({ ids }),
       });
-      await r.json();
+      const d = await r.json();
+      if (!r.ok || d.ok === false) {
+        window.alert(d.message || `Bulk reject failed (HTTP ${r.status}).`);
+        return;
+      }
+      purgeCompaniesFromActiveViews(ids);
       setSelectedSimilarIds([]);
       setSimilarModalOpen(false);
       setSimilarMatches([]);
@@ -685,6 +731,47 @@ export default function CompanySourcingTool() {
       /* ignore */
     } finally {
       setBulkRejectLoading(false);
+    }
+  };
+
+  const deleteAllSaved = async () => {
+    if (!savedRows.length) return;
+    const n = savedRows.length;
+    if (
+      !window.confirm(
+        `Delete all ${n} saved ${n === 1 ? "company" : "companies"}? They will be removed from the universe and moved to the Deleted tab.`
+      )
+    ) {
+      return;
+    }
+    const ids = savedRows.map((c) => c.id);
+    setDeleteAllSavedLoading(true);
+    try {
+      const r = await fetch("/api/companies/bulk-reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      let d = {};
+      try {
+        d = await r.json();
+      } catch {
+        window.alert("Delete all failed: could not read server response. Is the API running?");
+        return;
+      }
+      if (!r.ok || d.ok === false) {
+        window.alert(d.message || `Delete all failed (HTTP ${r.status}).`);
+        return;
+      }
+      purgeCompaniesFromActiveViews(ids);
+      loadSavedRows();
+      loadUniverseRows();
+      refreshRejectedTotal();
+      if (activeTab === "deleted") loadRejectedRows();
+    } catch (e) {
+      window.alert(e?.message || "Delete all failed.");
+    } finally {
+      setDeleteAllSavedLoading(false);
     }
   };
 
@@ -994,6 +1081,12 @@ export default function CompanySourcingTool() {
     if (activeTab === "build") fetchBuildHistory();
   }, [activeTab, fetchBuildHistory]);
 
+  useEffect(() => {
+    if (buildStatus !== "running" && buildStatus !== "paused") return undefined;
+    const id = setInterval(fetchBuildHistory, 15000);
+    return () => clearInterval(id);
+  }, [buildStatus, fetchBuildHistory]);
+
   const startBuild = async () => {
     setBuildStatus("starting");
     setBuildStats({ discovered: 0, basicEnriched: 0, fullyEnriched: 0, classified: 0, failed: 0, skipped: 0 });
@@ -1009,6 +1102,7 @@ export default function CompanySourcingTool() {
         stageBThreshold: buildStageBThreshold,
         useOllama: buildUseOllama,
         breadth: buildBreadth,
+        companyTypeFilter: buildCompanyTypeFilter,
       };
       const res = await fetch("/api/universe/build", {
         method: "POST",
@@ -1029,6 +1123,12 @@ export default function CompanySourcingTool() {
           if (msg.type?.startsWith("build:log")) {
             setBuildLog(msg.message || "");
           }
+          if (msg.type === "build:snapshot") {
+            if (msg.status === "RUNNING") setBuildStatus("running");
+            else if (msg.status === "PAUSED") setBuildStatus("paused");
+            else if (msg.status === "ERROR") setBuildStatus("error");
+            else if (msg.status === "DONE" || msg.status === "STOPPED") setBuildStatus("stopped");
+          }
           if (msg.discovered !== undefined) {
             setBuildStats((prev) => ({
               ...prev,
@@ -1043,6 +1143,16 @@ export default function CompanySourcingTool() {
           if (msg.type === "build:error") {
             setBuildStatus("error");
             setBuildLog(msg.message || "Build error");
+            es.close();
+            buildEventSourceRef.current = null;
+            fetchBuildHistory();
+          }
+          if (msg.type === "build:done") {
+            setBuildStatus("stopped");
+            setBuildLog("Build complete.");
+            es.close();
+            buildEventSourceRef.current = null;
+            fetchBuildHistory();
           }
           if (msg.type === "build:timeout") {
             setBuildStatus("stopped");
@@ -1097,6 +1207,218 @@ export default function CompanySourcingTool() {
     buildRemainingSeconds == null
       ? null
       : `${Math.floor(buildRemainingSeconds / 3600)}h ${Math.floor((buildRemainingSeconds % 3600) / 60)}m remaining`;
+  // #endregion
+
+  // #region Enrich List
+  const parseEnrichUpload = useCallback((arrayBuffer) => {
+    const wb = XLSX.read(arrayBuffer, { type: "array" });
+    const sheetName = wb.SheetNames[0];
+    const sheet = wb.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+    if (!matrix.length) return { headers: [], rows: [] };
+    const headers = matrix[0].map((h) => String(h ?? "").trim());
+    const rows = matrix
+      .slice(1)
+      .filter((r) => r.some((cell) => String(cell ?? "").trim()))
+      .map((r) => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          obj[h] = r[i] ?? "";
+        });
+        return obj;
+      });
+    return { headers, rows };
+  }, []);
+
+  const handleEnrichFile = useCallback(
+    async (file) => {
+      if (!file) return;
+      setEnrichError("");
+      setEnrichOutputRows({});
+      setEnrichRowStatus({});
+      setEnrichProgress(null);
+      setEnrichJobId(null);
+      try {
+        const buf = await file.arrayBuffer();
+        const { headers, rows } = parseEnrichUpload(buf);
+        if (!rows.length) {
+          setEnrichError("No data rows found in the spreadsheet.");
+          return;
+        }
+        setEnrichHeaders(headers);
+        setEnrichInputRows(rows);
+        setEnrichFileName(file.name.replace(/\.xlsx?$/i, "") || "enriched-list");
+        const pending = {};
+        rows.forEach((_, i) => {
+          pending[i] = "pending";
+        });
+        setEnrichRowStatus(pending);
+      } catch (e) {
+        setEnrichError(e.message || "Failed to parse Excel file");
+      }
+    },
+    [parseEnrichUpload],
+  );
+
+  const mergeEnrichRowForExport = useCallback((inputRow, enrichedRow, headers, fillBlanksOnly) => {
+    const out = {};
+    for (const h of headers) {
+      const inputVal = inputRow[h];
+      const enrichedVal = enrichedRow?.[h];
+      const inputBlank = inputVal == null || String(inputVal).trim() === "";
+      if (fillBlanksOnly) {
+        out[h] = inputBlank ? (enrichedVal ?? inputVal ?? "") : inputVal;
+      } else if (enrichedVal != null && String(enrichedVal).trim() !== "") {
+        out[h] = enrichedVal;
+      } else {
+        out[h] = inputVal ?? "";
+      }
+    }
+    return out;
+  }, []);
+
+  const runEnrichList = async () => {
+    if (!enrichInputRows.length || enrichRunning) return;
+    setEnrichRunning(true);
+    setEnrichError("");
+    setEnrichOutputRows({});
+    enrichOutputRowsRef.current = {};
+    setEnrichAutoExportPending(false);
+    const pending = {};
+    enrichInputRows.forEach((_, i) => {
+      pending[i] = "pending";
+    });
+    setEnrichRowStatus(pending);
+    setEnrichProgress({ processed: 0, total: enrichInputRows.length });
+
+    const clearEnrichStaleTimer = () => {
+      if (enrichStaleTimerRef.current) {
+        clearTimeout(enrichStaleTimerRef.current);
+        enrichStaleTimerRef.current = null;
+      }
+    };
+
+    const resetEnrichStaleTimer = (es) => {
+      clearEnrichStaleTimer();
+      enrichStaleTimerRef.current = setTimeout(() => {
+        setEnrichRunning(false);
+        setEnrichError("Enrichment stream stalled — try again");
+        es.close();
+        enrichEventSourceRef.current = null;
+        enrichStaleTimerRef.current = null;
+      }, 45000);
+    };
+
+    const finishEnrichStream = (es) => {
+      clearEnrichStaleTimer();
+      setEnrichRunning(false);
+      es.close();
+      enrichEventSourceRef.current = null;
+    };
+
+    try {
+      const res = await fetch("/api/enrich-list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: enrichInputRows,
+          options: {
+            fillBlanksOnly: enrichFillBlanksOnly,
+            useOllama: enrichUseOllama,
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(`Enrich HTTP ${res.status}`);
+      const { jobId } = await res.json();
+      if (!jobId) throw new Error("No jobId returned");
+      setEnrichJobId(jobId);
+
+      if (enrichEventSourceRef.current) enrichEventSourceRef.current.close();
+      clearEnrichStaleTimer();
+
+      const es = new EventSource(`/api/enrich-list/${jobId}/stream`);
+      enrichEventSourceRef.current = es;
+      resetEnrichStaleTimer(es);
+
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "progress") {
+            resetEnrichStaleTimer(es);
+            setEnrichProgress({ processed: msg.processed, total: msg.total });
+          }
+          if (msg.type === "row") {
+            resetEnrichStaleTimer(es);
+            const rowData = msg.enriched || msg.input;
+            enrichOutputRowsRef.current = { ...enrichOutputRowsRef.current, [msg.index]: rowData };
+            setEnrichOutputRows((prev) => ({ ...prev, [msg.index]: rowData }));
+            setEnrichRowStatus((prev) => ({ ...prev, [msg.index]: msg.status === "ok" ? "ok" : "error" }));
+          }
+          if (msg.type === "error") {
+            setEnrichError(msg.message || "Enrichment job failed");
+            finishEnrichStream(es);
+          }
+          if (msg.type === "done") {
+            finishEnrichStream(es);
+            setEnrichAutoExportPending(true);
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      };
+      es.onerror = () => {
+        finishEnrichStream(es);
+        setEnrichError("Connection lost during enrichment");
+      };
+    } catch (e) {
+      clearEnrichStaleTimer();
+      setEnrichRunning(false);
+      setEnrichError(e.message || String(e));
+    }
+  };
+
+  const exportEnrichExcel = useCallback(
+    (outputOverride) => {
+      if (!enrichHeaders.length || !enrichInputRows.length) return;
+      const output = outputOverride ?? enrichOutputRowsRef.current;
+      const rows = enrichInputRows.map((inputRow, index) => {
+        const enrichedRow = output[index] ?? enrichOutputRows[index] ?? inputRow;
+        return mergeEnrichRowForExport(inputRow, enrichedRow, enrichHeaders, enrichFillBlanksOnly);
+      });
+      const ws = XLSX.utils.json_to_sheet(rows, { header: enrichHeaders });
+      ws["!cols"] = enrichHeaders.map(() => ({ wch: 22 }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Sourcing");
+      XLSX.writeFile(wb, `${enrichFileName || "enriched-list"}.xlsx`);
+    },
+    [enrichHeaders, enrichInputRows, enrichOutputRows, enrichFillBlanksOnly, enrichFileName, mergeEnrichRowForExport],
+  );
+
+  const enrichDoneCount = useMemo(
+    () => Object.values(enrichRowStatus).filter((s) => s === "ok" || s === "error").length,
+    [enrichRowStatus],
+  );
+
+  useEffect(() => {
+    if (!enrichAutoExportPending || enrichRunning) return;
+    if (enrichInputRows.length === 0) return;
+    if (enrichDoneCount < enrichInputRows.length) return;
+    exportEnrichExcel();
+    setEnrichAutoExportPending(false);
+  }, [
+    enrichAutoExportPending,
+    enrichRunning,
+    enrichDoneCount,
+    enrichInputRows.length,
+    exportEnrichExcel,
+  ]);
+
+  const enrichPreviewHeaders = useMemo(() => {
+    const preferred = ["Company", "Website", "Vertical", "Country", "Overview", "Ownership"];
+    const picked = preferred.filter((h) => enrichHeaders.some((x) => x.toLowerCase().trim() === h.toLowerCase()));
+    if (picked.length) return picked;
+    return enrichHeaders.slice(0, 6);
+  }, [enrichHeaders]);
   // #endregion
 
   // #region Excel export
@@ -1343,6 +1665,7 @@ export default function CompanySourcingTool() {
               ["saved", `Saved (${savedRows.length})`],
               ["universe", `Universe (${universeTotal})`],
               ["build", "Build Universe"],
+              ["enrich-list", "Enrich List"],
               ["deleted", `Deleted (${rejectedTotal})`],
             ].map(([id, lbl]) => (
               <button
@@ -1857,6 +2180,14 @@ export default function CompanySourcingTool() {
                       >
                         {exportFlash ? "Exported" : "Export Excel"}
                       </button>
+                      <button
+                        type="button"
+                        onClick={deleteAllSaved}
+                        disabled={!savedRows.length || deleteAllSavedLoading}
+                        className="rounded-md border border-destructive/40 px-4 py-2 text-ui font-semibold text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {deleteAllSavedLoading ? "…" : "Delete all"}
+                      </button>
                     </div>
                   </div>
                   <div className="flex flex-col gap-4">
@@ -2153,7 +2484,7 @@ export default function CompanySourcingTool() {
                 <div>
                   <h2 className="text-ui font-semibold text-foreground">Overnight Universe Builder</h2>
                   <p className="mt-1 text-data text-muted-foreground">
-                    Discover and enrich companies in the background. Discovery is permissive &mdash; every candidate is stored even if it doesn&apos;t match current filters.
+                    Discover and enrich companies in the background. Verticals and products control discovery scope; company type is applied after Stage B enrichment to keep only matching companies in the active universe.
                   </p>
                 </div>
 
@@ -2251,6 +2582,26 @@ export default function CompanySourcingTool() {
                         <option value="broad">Broad (2x)</option>
                         <option value="exhaustive">Exhaustive (4x)</option>
                       </select>
+                    </div>
+
+                    {/* Company type */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Company type</label>
+                      <select
+                        value={buildCompanyTypeFilter}
+                        onChange={(e) => setBuildCompanyTypeFilter(e.target.value)}
+                        disabled={buildDepth === "metadata_only"}
+                        className="rounded-md border border-border bg-card px-3 py-2 text-data text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {COMPANY_TYPES.map((s) => (
+                          <option key={s}>{s}</option>
+                        ))}
+                      </select>
+                      {buildDepth === "metadata_only" && (
+                        <p className="text-data text-muted-foreground">
+                          Company type is classified during Stage B (Standard or Deep depth).
+                        </p>
+                      )}
                     </div>
 
                     {/* Ollama toggle (deep only) */}
@@ -2462,6 +2813,9 @@ export default function CompanySourcingTool() {
                           {b.status}
                         </span>
                         <span className="text-muted-foreground">{b.config?.depth || "standard"}</span>
+                        {b.config?.companyTypeFilter && b.config.companyTypeFilter !== "Any Type" && (
+                          <span className="text-muted-foreground">{b.config.companyTypeFilter}</span>
+                        )}
                         <span className="tabular-nums text-foreground">
                           {(b.stats?.discovered || 0).toLocaleString()} disc
                         </span>
@@ -2475,6 +2829,186 @@ export default function CompanySourcingTool() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "enrich-list" && (
+            <div className="animate-in-fade space-y-5">
+              <div className="rounded-lg border border-border bg-card p-5 shadow-sm space-y-5">
+                <div>
+                  <h2 className="text-ui font-semibold text-foreground">Enrich from spreadsheet</h2>
+                  <p className="mt-1 text-data text-muted-foreground">
+                    Upload an Excel file with company names (and optional partial data). The tool resolves each website,
+                    enriches missing fields, and lets you download a filled-in file. Results are not saved to the Universe.
+                  </p>
+                </div>
+
+                <div
+                  className={`rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
+                    enrichDragOver ? "border-primary bg-primary/5" : "border-border bg-muted/20"
+                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setEnrichDragOver(true);
+                  }}
+                  onDragLeave={() => setEnrichDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setEnrichDragOver(false);
+                    const file = e.dataTransfer.files?.[0];
+                    if (file) handleEnrichFile(file);
+                  }}
+                >
+                  <input
+                    ref={enrichFileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleEnrichFile(file);
+                      e.target.value = "";
+                    }}
+                  />
+                  <p className="text-data text-muted-foreground">
+                    Drag and drop an Excel file here, or{" "}
+                    <button
+                      type="button"
+                      onClick={() => enrichFileInputRef.current?.click()}
+                      className="font-semibold text-primary hover:underline"
+                    >
+                      browse
+                    </button>
+                  </p>
+                  {enrichFileName && (
+                    <p className="mt-2 text-data text-foreground">
+                      Loaded: <span className="font-medium">{enrichFileName}.xlsx</span> ({enrichInputRows.length} rows)
+                    </p>
+                  )}
+                </div>
+
+                {enrichError && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-data text-destructive">
+                    {enrichError}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-4">
+                  <label className="inline-flex items-center gap-2 text-data text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={enrichFillBlanksOnly}
+                      onChange={(e) => setEnrichFillBlanksOnly(e.target.checked)}
+                      className="rounded border-border"
+                    />
+                    Fill blanks only (preserve existing values on export)
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-data text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={enrichUseOllama}
+                      onChange={(e) => setEnrichUseOllama(e.target.checked)}
+                      disabled={enrichRunning}
+                      className="rounded border-border"
+                    />
+                    Use Ollama to fill gaps (local LLM)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={runEnrichList}
+                    disabled={enrichRunning || !enrichInputRows.length}
+                    className="inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-ui font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {enrichRunning ? "Enriching…" : "Start enriching"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exportEnrichExcel}
+                    disabled={!enrichDoneCount || enrichRunning}
+                    className="inline-flex items-center justify-center rounded-md border border-primary/40 px-4 py-2.5 text-ui font-semibold text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Download Excel
+                  </button>
+                </div>
+
+                {enrichProgress && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-data text-muted-foreground">
+                      <span>
+                        {enrichProgress.processed} / {enrichProgress.total} rows
+                      </span>
+                      <span>
+                        {enrichProgress.total
+                          ? Math.round((enrichProgress.processed / enrichProgress.total) * 100)
+                          : 0}
+                        %
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-300"
+                        style={{
+                          width: `${enrichProgress.total ? (enrichProgress.processed / enrichProgress.total) * 100 : 0}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {enrichInputRows.length > 0 && (
+                <div className="rounded-lg border border-border bg-card shadow-sm overflow-x-auto">
+                  <table className="min-w-full text-data">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/40 text-left">
+                        <th className="px-3 py-2 font-semibold text-muted-foreground">Status</th>
+                        {enrichPreviewHeaders.map((h) => (
+                          <th key={h} className="px-3 py-2 font-semibold text-muted-foreground">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {enrichInputRows.map((inputRow, index) => {
+                        const status = enrichRowStatus[index] || "pending";
+                        const merged = mergeEnrichRowForExport(
+                          inputRow,
+                          enrichOutputRows[index] || inputRow,
+                          enrichHeaders,
+                          enrichFillBlanksOnly,
+                        );
+                        const statusClass =
+                          status === "ok"
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100"
+                            : status === "error"
+                              ? "border-destructive/40 bg-destructive/10 text-destructive"
+                              : status === "pending" && enrichRunning
+                                ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                                : "border-border bg-muted text-muted-foreground";
+                        return (
+                          <tr key={index} className="border-b border-border/60 last:border-0">
+                            <td className="px-3 py-2">
+                              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusClass}`}>
+                                {status === "ok" ? "Done" : status === "error" ? "Error" : enrichRunning ? "Running" : "Pending"}
+                              </span>
+                            </td>
+                            {enrichPreviewHeaders.map((h) => {
+                              const headerKey = enrichHeaders.find((x) => x.toLowerCase().trim() === h.toLowerCase()) || h;
+                              const val = merged[headerKey] ?? "";
+                              return (
+                                <td key={h} className="max-w-[240px] truncate px-3 py-2 text-foreground" title={String(val)}>
+                                  {String(val)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
