@@ -8,7 +8,8 @@ import { enrichCandidateStageA, enrichCandidateStageB } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
 import {
   countBackfillCandidates,
-  iterateBackfillCandidates,
+  listBackfillCandidateIds,
+  getCompanyById,
   updateCompanyById,
   setRejected,
   rowToCompany,
@@ -173,7 +174,8 @@ export async function runBackfillEnrich(jobId, config, env, emit) {
     activeProduct: config?.selectedProducts?.[0] || null,
   };
 
-  const total = countBackfillCandidates();
+  const ids = listBackfillCandidateIds();
+  const total = ids.length;
 
   const stats = {
     total,
@@ -200,11 +202,14 @@ export async function runBackfillEnrich(jobId, config, env, emit) {
   const queue = new PQueue({ concurrency });
 
   try {
-    for (const row of iterateBackfillCandidates()) {
+    for (const id of ids) {
       if (jobState.stopped) break;
 
       await queue.add(async () => {
         if (jobState.stopped) return;
+
+        const row = getCompanyById(id);
+        if (!row) return;
 
         const label = row.name || row.domain || String(row.id);
         try {

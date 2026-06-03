@@ -23,6 +23,7 @@ export function getDb() {
   if (!db) {
     db = new Database(dbPath);
     db.pragma("journal_mode = WAL");
+    db.pragma("busy_timeout = 5000");
     db.exec(`
       CREATE TABLE IF NOT EXISTS companies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -514,13 +515,15 @@ export function countBackfillCandidates() {
     .get().c;
 }
 
-export function iterateBackfillCandidates() {
-  return getDb()
+/** Candidate ids for backfill (closes statement immediately; safe with concurrent API reads). */
+export function listBackfillCandidateIds() {
+  const rows = getDb()
     .prepare(
-      `SELECT * FROM companies WHERE ${BACKFILL_CANDIDATE_WHERE}
+      `SELECT id FROM companies WHERE ${BACKFILL_CANDIDATE_WHERE}
        ORDER BY updated_at DESC`
     )
-    .iterate();
+    .all();
+  return rows.map((r) => r.id);
 }
 // #endregion
 
