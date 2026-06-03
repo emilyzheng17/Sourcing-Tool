@@ -29,6 +29,11 @@ import {
   resumeBuild,
   stopBuild,
 } from "./overnightPipeline.js";
+import {
+  runBackfillEnrich,
+  getBackfillPreviewCount,
+  stopBackfillJob,
+} from "./backfillEnrich.js";
 import { getBuildJob, listBuildJobs, reconcileStaleBuildJobs } from "./db.js";
 import { linkedInExportStatus } from "./lib/highTosEnv.js";
 import { runEnrichListJob } from "./enrichByName.js";
@@ -380,6 +385,7 @@ app.post("/api/universe/similar-to-rejected", (req, res) => {
 // ── Overnight Universe Builder API ─────────────────────────────
 
 const buildJobs = new Map();
+const backfillJobs = new Map();
 
 app.post("/api/universe/build", (req, res) => {
   try {
@@ -480,6 +486,85 @@ app.get("/api/universe/builds", (_req, res) => {
     return { id: r.id, status: r.status, config, stats, created_at: r.created_at, updated_at: r.updated_at };
   });
   res.json({ ok: true, builds: result });
+});
+
+// ── Backfill empty / unscored companies ─────────────────────────
+
+app.get("/api/universe/backfill/preview", (_req, res) => {
+  try {
+    const count = getBackfillPreviewCount();
+    res.json({ ok: true, count });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.post("/api/universe/backfill", (req, res) => {
+  try {
+    const config = req.body && typeof req.body === "object" ? req.body : {};
+    const jobId = randomUUID();
+    backfillJobs.set(jobId, { status: "running", subscribers: new Set() });
+    res.json({ jobId });
+
+    setTimeout(() => {
+      (async () => {
+        const emit = (evt) => {
+          const job = backfillJobs.get(jobId);
+          if (!job) return;
+          for (const fn of job.subscribers) {
+            try {
+              fn(evt);
+            } catch {
+              /* ignore */
+            }
+          }
+        };
+
+        try {
+          await runBackfillEnrich(jobId, config, process.env, emit);
+          const job = backfillJobs.get(jobId);
+          if (job) job.status = "done";
+        } catch (e) {
+          emit({ type: "backfill:error", message: e.message || String(e) });
+          const job = backfillJobs.get(jobId);
+          if (job) job.status = "error";
+        }
+      })();
+    }, 0);
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message || String(e) });
+  }
+});
+
+app.get("/api/universe/backfill/:jobId/stream", (req, res) => {
+  const job = backfillJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).end();
+    return;
+  }
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const send = (evt) => {
+    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+  };
+
+  const listener = (evt) => send(evt);
+  job.subscribers.add(listener);
+
+  req.on("close", () => {
+    job.subscribers.delete(listener);
+  });
+});
+
+app.post("/api/universe/backfill/:jobId/stop", (req, res) => {
+  const jobId = req.params.jobId;
+  stopBackfillJob(jobId);
+  const job = backfillJobs.get(jobId);
+  if (job) job.status = "stopped";
+  res.json({ ok: true, status: "stopped" });
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);

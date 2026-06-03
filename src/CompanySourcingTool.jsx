@@ -286,6 +286,18 @@ export default function CompanySourcingTool() {
   const [buildStartedAt, setBuildStartedAt] = useState(null);
   const [buildHistory, setBuildHistory] = useState([]);
   const buildEventSourceRef = useRef(null);
+  const backfillEventSourceRef = useRef(null);
+  const [backfillPreviewCount, setBackfillPreviewCount] = useState(null);
+  const [backfillJobId, setBackfillJobId] = useState(null);
+  const [backfillStatus, setBackfillStatus] = useState(null);
+  const [backfillStats, setBackfillStats] = useState({
+    total: 0,
+    scanned: 0,
+    enriched: 0,
+    removed: 0,
+    failed: 0,
+  });
+  const [backfillLog, setBackfillLog] = useState("");
   const enrichEventSourceRef = useRef(null);
   const enrichStaleTimerRef = useRef(null);
   const enrichFileInputRef = useRef(null);
@@ -1239,6 +1251,101 @@ export default function CompanySourcingTool() {
     buildRemainingSeconds == null
       ? null
       : `${Math.floor(buildRemainingSeconds / 3600)}h ${Math.floor((buildRemainingSeconds % 3600) / 60)}m remaining`;
+  // #endregion
+
+  // #region Backfill empty companies
+  const fetchBackfillPreview = useCallback(async () => {
+    try {
+      const r = await fetch("/api/universe/backfill/preview");
+      const d = await r.json();
+      if (d.ok) setBackfillPreviewCount(d.count ?? 0);
+    } catch {
+      setBackfillPreviewCount(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "build") fetchBackfillPreview();
+  }, [activeTab, fetchBackfillPreview]);
+
+  const startBackfill = async () => {
+    setBackfillStatus("starting");
+    setBackfillStats({ total: 0, scanned: 0, enriched: 0, removed: 0, failed: 0 });
+    setBackfillLog("Starting cleanup…");
+    try {
+      const res = await fetch("/api/universe/backfill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { jobId } = await res.json();
+      setBackfillJobId(jobId);
+      setBackfillStatus("running");
+
+      if (backfillEventSourceRef.current) backfillEventSourceRef.current.close();
+      const es = new EventSource(`/api/universe/backfill/${jobId}/stream`);
+      backfillEventSourceRef.current = es;
+      es.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "backfill:log" && msg.message) {
+            setBackfillLog(msg.message);
+          }
+          if (msg.total !== undefined || msg.scanned !== undefined) {
+            setBackfillStats((prev) => ({
+              total: msg.total ?? prev.total,
+              scanned: msg.scanned ?? msg.processed ?? prev.scanned,
+              enriched: msg.enriched ?? prev.enriched,
+              removed: msg.removed ?? prev.removed,
+              failed: msg.failed ?? prev.failed,
+            }));
+          }
+          if (msg.type === "backfill:error") {
+            setBackfillStatus("error");
+            setBackfillLog(msg.message || "Backfill error");
+            es.close();
+            backfillEventSourceRef.current = null;
+            fetchBackfillPreview();
+          }
+          if (msg.type === "backfill:done") {
+            setBackfillStatus("stopped");
+            setBackfillLog(
+              msg.stopped
+                ? "Stopped. Partial run complete."
+                : `Done — ${msg.enriched ?? 0} enriched, ${msg.removed ?? 0} removed.`,
+            );
+            es.close();
+            backfillEventSourceRef.current = null;
+            fetchBackfillPreview();
+            loadUniverseRows();
+            loadSavedRows();
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+      es.onerror = () => {
+        es.close();
+        backfillEventSourceRef.current = null;
+      };
+    } catch (e) {
+      setBackfillStatus("error");
+      setBackfillLog(e.message || "Failed to start backfill");
+    }
+  };
+
+  const stopBackfillFn = async () => {
+    if (!backfillJobId) return;
+    await fetch(`/api/universe/backfill/${backfillJobId}/stop`, { method: "POST" });
+    setBackfillStatus("stopped");
+    if (backfillEventSourceRef.current) {
+      backfillEventSourceRef.current.close();
+      backfillEventSourceRef.current = null;
+    }
+    fetchBackfillPreview();
+    loadUniverseRows();
+  };
   // #endregion
 
   // #region Enrich List
@@ -2838,6 +2945,87 @@ export default function CompanySourcingTool() {
                     </button>
                   </div>
                 )}
+              </div>
+
+              <div className="rounded-lg border border-border bg-card p-5 shadow-sm space-y-4">
+                <div>
+                  <h2 className="text-ui font-semibold text-foreground">Clean up empty companies</h2>
+                  <p className="mt-1 text-data text-muted-foreground">
+                    Re-enrich universe rows that have no thesis score yet. Companies that fail hard checks
+                    (unreachable site, pre-score reject, or public listing) are soft-rejected and hidden from the active universe.
+                  </p>
+                </div>
+
+                <p className="text-data text-foreground">
+                  {backfillPreviewCount == null
+                    ? "Checking database…"
+                    : backfillPreviewCount === 0
+                      ? "No empty companies need cleanup."
+                      : `${backfillPreviewCount.toLocaleString()} companies without a score`}
+                </p>
+
+                {(!backfillStatus || backfillStatus === "stopped" || backfillStatus === "error") && (
+                  <button
+                    type="button"
+                    disabled={!backfillPreviewCount}
+                    onClick={startBackfill}
+                    className="rounded-md bg-primary px-4 py-2 text-data font-semibold text-primary-foreground hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Clean up empty companies
+                  </button>
+                )}
+
+                {backfillStatus && backfillStatus !== "stopped" && backfillStatus !== "error" && (
+                  <div className="space-y-3 rounded-md border border-border bg-muted/20 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`rounded-full border px-2 py-0.5 text-data font-medium ${
+                          backfillStatus === "running"
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100"
+                            : "border-border bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {backfillStatus === "running" ? "Running" : "Starting…"}
+                      </span>
+                      {backfillStats.total > 0 && (
+                        <span className="text-data tabular-nums text-muted-foreground">
+                          {backfillStats.scanned} / {backfillStats.total}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-4 text-data tabular-nums">
+                      <span className="text-foreground">{backfillStats.enriched} enriched</span>
+                      <span className="text-foreground">{backfillStats.removed} removed</span>
+                      <span className="text-muted-foreground">{backfillStats.failed} failed</span>
+                    </div>
+                    {backfillLog && (
+                      <p className="text-data text-muted-foreground truncate">{backfillLog}</p>
+                    )}
+                    {backfillStatus === "running" && (
+                      <button
+                        type="button"
+                        onClick={stopBackfillFn}
+                        className="rounded-md border border-border px-3 py-1.5 text-data font-medium text-foreground hover:bg-muted/50"
+                      >
+                        Stop
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {(backfillStatus === "stopped" || backfillStatus === "error") &&
+                  backfillStats.scanned > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab("universe");
+                        loadUniverseRows();
+                      }}
+                      className="rounded-md border border-border px-4 py-2 text-data font-semibold text-foreground hover:bg-muted/50"
+                    >
+                      Browse Universe
+                    </button>
+                  )}
               </div>
 
               {/* Build history */}

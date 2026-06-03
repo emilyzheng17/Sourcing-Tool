@@ -463,6 +463,28 @@ export function getCompaniesByIds(ids) {
   const placeholders = ids.map(() => "?").join(",");
   return getDb().prepare(`SELECT * FROM companies WHERE id IN (${placeholders})`).all(...ids);
 }
+
+const BACKFILL_CANDIDATE_WHERE = `
+  is_rejected = 0
+  AND json_extract(data, '$.score') IS NULL
+  AND json_extract(data, '$.thesisScore') IS NULL
+`;
+
+/** Rows with no thesis score yet (discovered / never classified). */
+export function countBackfillCandidates() {
+  return getDb()
+    .prepare(`SELECT COUNT(*) as c FROM companies WHERE ${BACKFILL_CANDIDATE_WHERE}`)
+    .get().c;
+}
+
+export function iterateBackfillCandidates() {
+  return getDb()
+    .prepare(
+      `SELECT * FROM companies WHERE ${BACKFILL_CANDIDATE_WHERE}
+       ORDER BY updated_at DESC`
+    )
+    .iterate();
+}
 // #endregion
 
 // #region Overnight Universe Builder
