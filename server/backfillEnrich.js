@@ -28,12 +28,11 @@ const TASK_TIMEOUT_MS = 120_000;
 const activeJobs = new Map();
 
 function withTaskTimeout(fn, ms = TASK_TIMEOUT_MS) {
-  return Promise.race([
-    fn(),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("task timeout")), ms);
-    }),
-  ]);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("task timeout")), ms);
+  });
+  return Promise.race([fn(), timeout]).finally(() => clearTimeout(timer));
 }
 
 function safeEmit(emit, evt) {

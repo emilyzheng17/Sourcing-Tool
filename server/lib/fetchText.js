@@ -2,6 +2,8 @@ import { getCached, putCached } from "./dbCache.js";
 
 const UA = "SourcingTool/1.0 (+https://github.com/)";
 const FETCH_CACHE_TTL_DAYS = 7;
+/** Default cap when callers omit maxBytes — prevents unbounded res.text() OOM. */
+export const DEFAULT_MAX_FETCH_BYTES = 3_000_000;
 
 /** Avoid multi-GB heaps: discovery + enrichment can fetch many unique URLs. */
 const MAX_FETCH_CACHE_BYTES = 110 * 1024 * 1024;
@@ -114,7 +116,8 @@ export async function fetchText(url, opts = {}) {
       },
       redirect: "follow",
     });
-    const text = opts.maxBytes ? await readBodyCapped(res, opts.maxBytes) : await res.text();
+    const cap = opts.maxBytes ?? DEFAULT_MAX_FETCH_BYTES;
+    const text = await readBodyCapped(res, cap);
     const headers = {};
     try {
       res.headers.forEach((v, k) => {
@@ -140,7 +143,11 @@ export async function fetchText(url, opts = {}) {
  * Returns a UTF-8 string (may be truncated mid-character at boundary).
  */
 async function readBodyCapped(res, maxBytes) {
-  if (!res.body) return await res.text();
+  if (!res.body) {
+    const full = await res.text();
+    if (full.length <= maxBytes) return full;
+    return full.slice(0, maxBytes);
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: false });
   let result = "";

@@ -388,7 +388,11 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
   // If Stage A fetched a capped version, re-fetch full homepage for deep analysis
   if (homepageFetched && homepageHtml.length >= 24500) {
     try {
-      const { ok, text, headers } = await fetchText(base, { timeout: 12000, ...fetchOpts });
+      const { ok, text, headers } = await fetchText(base, {
+        timeout: 12000,
+        maxBytes: 600_000,
+        ...fetchOpts,
+      });
       if (ok && text) {
         if (headers) Object.assign(allHeaders, headers);
         const $ = cheerio.load(text);
@@ -414,7 +418,7 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
 
   try {
     const smUrl = joinUrl(base, "/sitemap.xml");
-    const sm = await fetchText(smUrl, { timeout: 8000, ...fetchOpts });
+    const sm = await fetchText(smUrl, { timeout: 8000, maxBytes: 2_000_000, ...fetchOpts });
     if (sm.ok && sm.text && sm.text.includes("<url")) {
       const $s = cheerio.load(sm.text, { xmlMode: true });
       $s("loc")
@@ -437,7 +441,11 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     pageList.map((p) =>
       pageFetchLimit(async () => {
         try {
-          const { ok, text, headers } = await fetchText(p, { timeout: 12000, ...fetchOpts });
+          const { ok, text, headers } = await fetchText(p, {
+            timeout: 12000,
+            maxBytes: 200_000,
+            ...fetchOpts,
+          });
           return { p, ok, text, headers };
         } catch {
           return { p, ok: false, text: null, headers: null };
