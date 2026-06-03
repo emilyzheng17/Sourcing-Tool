@@ -108,6 +108,7 @@ export async function searchApollo(brief, env, fetchOpts = {}) {
             page,
             per_page: perPage,
           }),
+          signal: AbortSignal.timeout(25000),
         });
         if (!res.ok) break;
         const data = await res.json();

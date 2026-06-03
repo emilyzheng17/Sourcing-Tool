@@ -21,6 +21,9 @@ import { searchSearxng } from "./searxng.js";
 import { searchDuckDuckGo } from "./duckduckgo.js";
 import { searchHighRiskSources } from "./highRisk/index.js";
 
+/** Hard cap so one adapter cannot block discovery fan-out indefinitely. */
+const SOURCE_TIMEOUT_MS = 90_000;
+
 /** Directory listing scrapers — keyed by product slug, not vertical; safe to skip on repeat passes. */
 export const DIRECTORY_SOURCE_KEYS = new Set([
   "g2",
@@ -48,8 +51,16 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
   const skipDirs = !!fo.skipDirectorySources;
 
   const settle = (sourceKey, p) =>
-    Promise.resolve(p)
+    Promise.race([
+      Promise.resolve(p),
+      new Promise((resolve) => setTimeout(() => resolve("__source_timeout__"), SOURCE_TIMEOUT_MS)),
+    ])
       .then((arr) => {
+        if (arr === "__source_timeout__") {
+          console.error(`[fanOutSources] ${sourceKey}: timed out after ${SOURCE_TIMEOUT_MS}ms`);
+          onSourceResult(sourceKey, []);
+          return;
+        }
         onSourceResult(sourceKey, Array.isArray(arr) ? arr : []);
       })
       .catch((err) => {

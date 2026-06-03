@@ -82,6 +82,7 @@ export async function searchDuckDuckGo(brief, _env) {
             "User-Agent": USER_AGENT,
           },
           body: new URLSearchParams({ q }),
+          signal: AbortSignal.timeout(20000),
         });
 
         if (!res.ok) {

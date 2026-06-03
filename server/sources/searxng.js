@@ -61,6 +61,7 @@ export async function searchSearxng(brief, env) {
         });
         const res = await fetch(`${baseUrl}/search?${params}`, {
           headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+          signal: AbortSignal.timeout(20000),
         });
 
         if (!res.ok) {

@@ -87,6 +87,7 @@ async function fetchOrgSearch(env, variant, limit, afterId) {
       "X-cb-user-key": env.CRUNCHBASE_API_KEY,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(25000),
   });
   if (!res.ok) return null;
   return res.json();

@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __sourcesDir = join(dirname(fileURLToPath(import.meta.url)), "../sources");
 import { PE_FIRMS } from "../sources/peFirms.data.js";
 import { ROLLUP_PAGES } from "../sources/rollupPages.data.js";
 import { MARKETPLACE_PAGES } from "../sources/marketplacePages.data.js";
@@ -178,4 +183,24 @@ test("marketplace link harvest skips marketplace host", () => {
   const rows = extractMarketplaceLinks(html, "https://appsource.microsoft.com/", "AppSource");
   assert.equal(rows.length, 1);
   assert.equal(rows[0].website, "https://vendor.example.com/app");
+});
+
+test("raw fetch discovery sources use AbortSignal.timeout", () => {
+  const searchApis = ["brave.js", "serper.js", "searxng.js", "duckduckgo.js", "exa.js", "tavily.js"];
+  const paginatedApis = ["apollo.js", "crunchbase.js"];
+  for (const file of searchApis) {
+    const src = readFileSync(join(__sourcesDir, file), "utf8");
+    assert.match(src, /AbortSignal\.timeout\(20000\)/, `${file} should use 20s fetch timeout`);
+  }
+  for (const file of paginatedApis) {
+    const src = readFileSync(join(__sourcesDir, file), "utf8");
+    assert.match(src, /AbortSignal\.timeout\(25000\)/, `${file} should use 25s fetch timeout`);
+  }
+});
+
+test("fanOutSources settle caps each source with Promise.race", () => {
+  const indexSrc = readFileSync(join(__sourcesDir, "index.js"), "utf8");
+  assert.match(indexSrc, /SOURCE_TIMEOUT_MS = 90_000/);
+  assert.match(indexSrc, /__source_timeout__/);
+  assert.match(indexSrc, /Promise\.race\(\[/);
 });

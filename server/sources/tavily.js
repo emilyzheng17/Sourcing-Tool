@@ -38,6 +38,7 @@ export async function searchTavily(brief, env) {
           max_results: maxResults,
           include_answer: false,
         }),
+        signal: AbortSignal.timeout(20000),
       });
       if (!res.ok) continue;
       const data = await res.json();

@@ -23,6 +23,7 @@ async function fetchBraveQueryResults(q, key) {
           Accept: "application/json",
           "X-Subscription-Token": key,
         },
+        signal: AbortSignal.timeout(20000),
       });
       if (!res.ok) {
         putCached(cacheKey, "brave", false, null);

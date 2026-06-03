@@ -35,6 +35,7 @@ async function fetchSerperQueryResults(q, key) {
           "X-API-KEY": key,
         },
         body: JSON.stringify({ q, num: 10 }),
+        signal: AbortSignal.timeout(20000),
       });
 
       if (!res.ok) {

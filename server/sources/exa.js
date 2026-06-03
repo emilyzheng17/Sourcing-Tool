@@ -21,6 +21,7 @@ async function exaFetchOnce(query, numResults, key) {
       type: "auto",
       numResults,
     }),
+    signal: AbortSignal.timeout(20000),
   });
   if (!res.ok) {
     const raw = await res.text().catch(() => "");
