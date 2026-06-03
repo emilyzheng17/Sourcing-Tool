@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import pLimit from "p-limit";
 import { fetchWithTimeout } from "./lib/fetchWithTimeout.js";
 import { fetchText } from "./lib/fetchText.js";
 import { normalizeDomain, isLikelyCompanyDomain, isDirectoryListingHost } from "./lib/domains.js";
@@ -428,24 +429,34 @@ export async function enrichCandidateStageB(candidate, stageA, brief, env, fetch
     /* ignore sitemap */
   }
 
-  for (const p of [...pages]) {
-    try {
-      if (homepageFetched && p.split("?")[0] === base.split("?")[0]) continue;
-      const { ok, text, headers } = await fetchText(p, { timeout: 12000, ...fetchOpts });
-      if (ok && text) {
-        if (p.toLowerCase().includes("/pricing")) fetchedPricingPath = true;
-        if (headers) Object.assign(allHeaders, headers);
-        const $ = cheerio.load(text);
-        const t = $("title").first().text().trim();
-        if (t) title = t.split("|")[0].trim();
-        const body = visibleTextFromHtml(text).slice(0, 12000);
-        combinedText += "\n" + body;
-        if (!rawHtmlForSocial && p.split("?")[0] === base.split("?")[0]) {
-          rawHtmlForSocial = text;
+  const pageList = [...pages].filter(
+    (p) => !(homepageFetched && p.split("?")[0] === base.split("?")[0]),
+  );
+  const pageFetchLimit = pLimit(5);
+  const pageFetchResults = await Promise.all(
+    pageList.map((p) =>
+      pageFetchLimit(async () => {
+        try {
+          const { ok, text, headers } = await fetchText(p, { timeout: 12000, ...fetchOpts });
+          return { p, ok, text, headers };
+        } catch {
+          return { p, ok: false, text: null, headers: null };
         }
+      }),
+    ),
+  );
+  for (const { p, ok, text, headers } of pageFetchResults) {
+    if (ok && text) {
+      if (p.toLowerCase().includes("/pricing")) fetchedPricingPath = true;
+      if (headers) Object.assign(allHeaders, headers);
+      const $ = cheerio.load(text);
+      const t = $("title").first().text().trim();
+      if (t) title = t.split("|")[0].trim();
+      const body = visibleTextFromHtml(text).slice(0, 12000);
+      combinedText += "\n" + body;
+      if (!rawHtmlForSocial && p.split("?")[0] === base.split("?")[0]) {
+        rawHtmlForSocial = text;
       }
-    } catch {
-      /* ignore */
     }
   }
 

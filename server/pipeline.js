@@ -3,11 +3,10 @@ import { enrichCandidateStageA, enrichCandidateStageB } from "./enrich.js";
 import { scoreThesis, applyManualOverrides } from "./score.js";
 import { normalizeDomain } from "./lib/domains.js";
 import { discoverMergedCandidatesStreaming } from "./lib/candidateDiscovery.js";
+import crypto from "crypto";
 import {
   upsertCompany,
-  getCompanyByDomain,
-  getCompanyById,
-  getFreshCompanyByDomain,
+  lookupCompanyByDomain,
   rowToCompany,
   markPublicCompanyExcluded,
   listPublicExcludedDomains,
@@ -22,6 +21,13 @@ import { isOllamaPretriageEnabled, ollamaPretriageCandidate } from "./lib/llmPre
 import PQueue from "p-queue";
 
 const SOURCE_QUALITY_THRESHOLD = 50;
+
+function llmClassifyCacheKey(companyName, homepageText) {
+  return crypto
+    .createHash("sha256")
+    .update(`${companyName || ""}\0${homepageText || ""}`)
+    .digest("hex");
+}
 
 // #region Pipeline config
 const JOB_MS_MIN = 10 * 60 * 1000;
@@ -93,6 +99,8 @@ export async function runSearchPipeline(brief, env, emit) {
   const pretriageEnabled = isOllamaPretriageEnabled(env);
   /** @type {Map<string, { count: number, sumScore: number, geThreshold: number }>} */
   const sourceQualityStats = new Map();
+  /** @type {Map<string, object>} */
+  const llmClassifyCache = new Map();
 
   function recordSourceQuality(scored) {
     const tags = Array.isArray(scored.sourceTags) ? scored.sourceTags : [scored.sourceTag].filter(Boolean);
@@ -136,9 +144,11 @@ export async function runSearchPipeline(brief, env, emit) {
             if (!c) return;
 
             const domainGuess = normalizeDomain(c.website || c.domain || "");
+            let domainLookup = null;
             if (domainGuess) {
-              const cached = getFreshCompanyByDomain(domainGuess, ttlDays);
-              if (cached) {
+              domainLookup = lookupCompanyByDomain(domainGuess, ttlDays);
+              if (domainLookup?.fresh) {
+                const cached = domainLookup.row;
                 if (cached.is_rejected || isPublicExcludedRow(cached)) {
                   emit({
                     type: "log",
@@ -265,10 +275,16 @@ export async function runSearchPipeline(brief, env, emit) {
 
             if (classifier && classifier.name !== "none") {
               try {
-                const llm = await classifier.classify({
-                  homepageText: (scored.homepageTextSample || "").slice(0, 8000),
-                  companyName: scored.name,
-                });
+                const homepageSlice = (scored.homepageTextSample || "").slice(0, 8000);
+                const cacheKey = llmClassifyCacheKey(scored.name, homepageSlice);
+                let llm = llmClassifyCache.get(cacheKey);
+                if (!llm) {
+                  llm = await classifier.classify({
+                    homepageText: homepageSlice,
+                    companyName: scored.name,
+                  });
+                  if (llm) llmClassifyCache.set(cacheKey, llm);
+                }
                 if (llm) {
                   scored = {
                     ...scored,
@@ -291,7 +307,10 @@ export async function runSearchPipeline(brief, env, emit) {
               }
             }
 
-            const existingRow = getCompanyByDomain(scored.domain);
+            const existingRow =
+              domainLookup?.row?.domain === scored.domain
+                ? domainLookup.row
+                : lookupCompanyByDomain(scored.domain, ttlDays)?.row ?? null;
             const manual = existingRow
               ? {
                   manual_mission_critical: existingRow.manual_mission_critical,
@@ -322,7 +341,7 @@ export async function runSearchPipeline(brief, env, emit) {
               return;
             }
 
-            const id = upsertCompany({
+            const row = upsertCompany({
               domain: scored.domain,
               name: scored.name,
               website: scored.website,
@@ -330,7 +349,6 @@ export async function runSearchPipeline(brief, env, emit) {
               isSaved: !!existingRow?.is_saved,
             });
 
-            const row = getCompanyById(id);
             const companyOut = rowToCompany(row);
             recordSourceQuality(scored);
             emit({ type: "company", company: companyOut });

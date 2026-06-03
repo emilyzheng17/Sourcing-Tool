@@ -70,9 +70,22 @@ export function getDb() {
     addCol("enrichment_attempt_count", "INTEGER DEFAULT 0");
     addCol("error_message", "TEXT");
     addCol("next_retry_at", "TEXT");
+    addCol("exclusion_reason", "TEXT");
 
     db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_companies_priority ON companies(priority_score)`);
+    db.exec(`
+      UPDATE companies
+      SET exclusion_reason = json_extract(data, '$.exclusionReason')
+      WHERE exclusion_reason IS NULL
+        AND is_rejected = 1
+        AND json_extract(data, '$.exclusionReason') IS NOT NULL
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_companies_exclusion_reason
+      ON companies(is_rejected, exclusion_reason)
+      WHERE is_rejected = 1
+    `);
 
     db.exec(`
       CREATE TABLE IF NOT EXISTS build_jobs (
@@ -132,6 +145,7 @@ export function upsertCompany({ domain, name, website, data, isSaved }) {
     "SELECT id, is_saved, is_rejected, data, manual_mission_critical, manual_vertically_integrated, manual_proprietary FROM companies WHERE domain = ?"
   ).get(domain);
   const payload = JSON.stringify(data ?? {});
+  let companyId;
   if (row) {
     const keepSaved = row.is_saved || isSaved ? 1 : 0;
     let keepRejected = row.is_rejected ? 1 : 0;
@@ -143,15 +157,28 @@ export function upsertCompany({ domain, name, website, data, isSaved }) {
         if (isPublicExclusionData(data)) keepRejected = 1;
       }
     }
+    let exclusionReason = null;
+    if (keepRejected === 1) {
+      exclusionReason = data?.exclusionReason ?? null;
+      if (exclusionReason == null) {
+        try {
+          exclusionReason = JSON.parse(row.data || "{}").exclusionReason ?? null;
+        } catch {
+          exclusionReason = null;
+        }
+      }
+    }
     d.prepare(
-      `UPDATE companies SET name = ?, website = ?, data = ?, is_saved = ?, is_rejected = ?, updated_at = datetime('now') WHERE domain = ?`
-    ).run(name ?? null, website ?? null, payload, keepSaved, keepRejected, domain);
-    return row.id;
+      `UPDATE companies SET name = ?, website = ?, data = ?, is_saved = ?, is_rejected = ?, exclusion_reason = ?, updated_at = datetime('now') WHERE domain = ?`
+    ).run(name ?? null, website ?? null, payload, keepSaved, keepRejected, exclusionReason, domain);
+    companyId = row.id;
+  } else {
+    d.prepare(
+      `INSERT INTO companies (domain, name, website, data, is_saved, is_rejected, exclusion_reason) VALUES (?, ?, ?, ?, ?, 0, NULL)`
+    ).run(domain, name ?? null, website ?? null, payload, isSaved ? 1 : 0);
+    companyId = d.prepare("SELECT last_insert_rowid() as id").get().id;
   }
-  d.prepare(
-    `INSERT INTO companies (domain, name, website, data, is_saved, is_rejected) VALUES (?, ?, ?, ?, ?, 0)`
-  ).run(domain, name ?? null, website ?? null, payload, isSaved ? 1 : 0);
-  return d.prepare("SELECT last_insert_rowid() as id").get().id;
+  return d.prepare("SELECT * FROM companies WHERE id = ?").get(companyId);
 }
 
 export function getCompanyById(id) {
@@ -189,10 +216,10 @@ export function markPublicCompanyExcluded({ domain, id, source = "unknown", extr
     const payload = JSON.stringify({ ...mergedBase, domain, website: extraData.website || `https://${domain}` });
     const info = d
       .prepare(
-        `INSERT INTO companies (domain, name, website, data, is_saved, is_rejected)
-         VALUES (?, ?, ?, ?, 0, 1)`
+        `INSERT INTO companies (domain, name, website, data, is_saved, is_rejected, exclusion_reason)
+         VALUES (?, ?, ?, ?, 0, 1, ?)`
       )
-      .run(domain, extraData.name ?? null, extraData.website ?? `https://${domain}`, payload);
+      .run(domain, extraData.name ?? null, extraData.website ?? `https://${domain}`, payload, PUBLIC_EXCLUSION_REASON);
     return { id: Number(info.lastInsertRowid), domain };
   }
 
@@ -214,10 +241,11 @@ export function markPublicCompanyExcluded({ domain, id, source = "unknown", extr
     `UPDATE companies SET
        is_rejected = 1,
        is_saved = 0,
+       exclusion_reason = ?,
        data = ?,
        updated_at = datetime('now')
      WHERE id = ?`
-  ).run(JSON.stringify(merged), row.id);
+  ).run(PUBLIC_EXCLUSION_REASON, JSON.stringify(merged), row.id);
 
   return { id: row.id, domain: row.domain };
 }
@@ -228,20 +256,34 @@ export function listPublicExcludedDomains() {
     .prepare(
       `SELECT domain FROM companies
        WHERE is_rejected = 1
-         AND json_extract(data, '$.exclusionReason') = ?`
+         AND exclusion_reason = ?`
     )
     .all(PUBLIC_EXCLUSION_REASON);
   return new Set(rows.map((r) => r.domain).filter(Boolean));
 }
 
-export function getFreshCompanyByDomain(domain, ttlDays) {
-  return getDb()
+/**
+ * Single domain read with optional freshness check (avoids duplicate SELECTs in pipeline).
+ * @returns {{ row: object, fresh: boolean } | null}
+ */
+export function lookupCompanyByDomain(domain, ttlDays) {
+  const row = getDb()
     .prepare(
-      `SELECT * FROM companies
-       WHERE domain = ?
-         AND updated_at >= datetime('now', ? || ' days')`
+      `SELECT *,
+         CASE WHEN updated_at >= datetime('now', ? || ' days') THEN 1 ELSE 0 END AS _fresh
+       FROM companies
+       WHERE domain = ?`
     )
-    .get(domain, `-${ttlDays}`);
+    .get(`-${ttlDays}`, domain);
+  if (!row) return null;
+  const fresh = !!row._fresh;
+  delete row._fresh;
+  return { row, fresh };
+}
+
+export function getFreshCompanyByDomain(domain, ttlDays) {
+  const hit = lookupCompanyByDomain(domain, ttlDays);
+  return hit?.fresh ? hit.row : null;
 }
 
 export function setSaved(id, saved) {

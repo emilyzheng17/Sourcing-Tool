@@ -3,6 +3,7 @@
  */
 
 import { fanOutSourcesIncremental } from "../sources/index.js";
+import pLimit from "p-limit";
 import {
   normalizeDomain,
   mergeSourceTags,
@@ -13,6 +14,7 @@ import { createApiCallBudgets } from "./apiCallBudget.js";
 import { generateDiscoveryQueries } from "./llmQueryGen.js";
 
 const MAX_MERGE_CAP = 5000;
+const DISCOVERY_PASS_CONCURRENCY = 3;
 
 export function primaryKey(c) {
   const d = normalizeDomain(c.website);
@@ -141,7 +143,6 @@ export async function discoverMergedCandidatesStreaming(
   /** @type {Record<string, number>} */
   const bucketTotals = {};
   const queuedKeys = new Set();
-  const directoryRanForProduct = new Set();
 
   const llmQueries = await generateDiscoveryQueries(brief, env, emitFn);
   let discoveryBrief = brief;
@@ -190,72 +191,73 @@ export async function discoverMergedCandidatesStreaming(
     }
   }
 
+  /** @type {{ vctx: string | null, product: string | null, skipDirectorySources: boolean }[]} */
+  const passSpecs = [];
+  const firstPassForProduct = new Set();
   for (const vctx of verticalContexts) {
-    if (Date.now() > deadline) {
-      timedOut = true;
-      break;
-    }
-    if (queuedKeys.size >= maxCompanies) {
-      capReached = true;
-      break;
-    }
-    const verticalLabel = vctx == null ? "broad" : vctx;
-    const selectedVerticalsForPass = vctx == null ? [] : [vctx];
-
     for (const product of products) {
-      if (Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
-      if (queuedKeys.size >= maxCompanies) {
-        capReached = true;
-        break;
-      }
-
       const activeProduct = product ?? discoveryBrief.activeProduct ?? "B2B software";
       const productKey = String(activeProduct);
-      const skipDirectorySources = directoryRanForProduct.has(productKey);
-
-      const subBrief = {
-        ...discoveryBrief,
-        activeProduct,
-        selectedTags: tagsForProduct(discoveryBrief, product),
-        selectedVerticals: selectedVerticalsForPass,
-      };
-      emitFn({
-        type: "log",
-        message: skipDirectorySources
-          ? `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — paid search + PE (directories skipped, already ran for product)`
-          : `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
-      });
-
-      /** @type {Record<string, number>} */
-      const passBucketTotals = {};
-      await fanOutSourcesIncremental(
-        subBrief,
-        env,
-        { ...discoveryFetchOpts, skipDirectorySources },
-        (sourceKey, arr) => {
-        const n = arr?.length || 0;
-        passBucketTotals[sourceKey] = n;
-        bucketTotals[sourceKey] = (bucketTotals[sourceKey] ?? 0) + n;
-        ingestCandidates(arr, product);
-        emitFn({
-          type: "log",
-          message: `Source ready [${verticalLabel}] (${product ?? "broad"}) ${sourceKey}: ${n}`,
-        });
-      },
-      );
-      emitFn({
-        type: "log",
-        message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(passBucketTotals)}`,
-      });
-
-      if (!skipDirectorySources) {
-        directoryRanForProduct.add(productKey);
-      }
+      const skipDirectorySources = firstPassForProduct.has(productKey);
+      if (!skipDirectorySources) firstPassForProduct.add(productKey);
+      passSpecs.push({ vctx, product, skipDirectorySources });
     }
   }
+
+  const passLimit = pLimit(DISCOVERY_PASS_CONCURRENCY);
+  await Promise.all(
+    passSpecs.map(({ vctx, product, skipDirectorySources }) =>
+      passLimit(async () => {
+        if (Date.now() > deadline) {
+          timedOut = true;
+          return;
+        }
+        if (queuedKeys.size >= maxCompanies) {
+          capReached = true;
+          return;
+        }
+
+        const verticalLabel = vctx == null ? "broad" : vctx;
+        const selectedVerticalsForPass = vctx == null ? [] : [vctx];
+        const activeProduct = product ?? discoveryBrief.activeProduct ?? "B2B software";
+
+        const subBrief = {
+          ...discoveryBrief,
+          activeProduct,
+          selectedTags: tagsForProduct(discoveryBrief, product),
+          selectedVerticals: selectedVerticalsForPass,
+        };
+        emitFn({
+          type: "log",
+          message: skipDirectorySources
+            ? `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — paid search + PE (directories skipped, already ran for product)`
+            : `Fan-out: [${verticalLabel}] × ${product ?? "broad"} — directories, Brave, Exa, Apollo, Crunchbase, Tavily…`,
+        });
+
+        /** @type {Record<string, number>} */
+        const passBucketTotals = {};
+        await fanOutSourcesIncremental(
+          subBrief,
+          env,
+          { ...discoveryFetchOpts, skipDirectorySources },
+          (sourceKey, arr) => {
+            const n = arr?.length || 0;
+            passBucketTotals[sourceKey] = n;
+            bucketTotals[sourceKey] = (bucketTotals[sourceKey] ?? 0) + n;
+            ingestCandidates(arr, product);
+            emitFn({
+              type: "log",
+              message: `Source ready [${verticalLabel}] (${product ?? "broad"}) ${sourceKey}: ${n}`,
+            });
+          },
+        );
+        emitFn({
+          type: "log",
+          message: `Sources raw [${verticalLabel}] (${product ?? "broad"}): ${JSON.stringify(passBucketTotals)}`,
+        });
+      }),
+    ),
+  );
 
   if (capReached) {
     emitFn({
