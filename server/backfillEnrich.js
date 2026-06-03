@@ -9,10 +9,11 @@ import { scoreThesis, applyManualOverrides } from "./score.js";
 import {
   countBackfillCandidates,
   iterateBackfillCandidates,
-  upsertCompany,
+  updateCompanyById,
   setRejected,
   rowToCompany,
 } from "./db.js";
+import { normalizeDomain } from "./lib/domains.js";
 import { resetFetchCacheAccounting } from "./lib/fetchText.js";
 
 const PERMISSIVE_BRIEF = {
@@ -22,7 +23,35 @@ const PERMISSIVE_BRIEF = {
   activeProduct: null,
 };
 
+const TASK_TIMEOUT_MS = 120_000;
 const activeJobs = new Map();
+
+function withTaskTimeout(fn, ms = TASK_TIMEOUT_MS) {
+  return Promise.race([
+    fn(),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("task timeout")), ms);
+    }),
+  ]);
+}
+
+function safeEmit(emit, evt) {
+  try {
+    emit(evt);
+  } catch {
+    /* never crash the job on SSE subscriber errors */
+  }
+}
+
+function coerceWebsite(row, data) {
+  const raw = row.website ?? data.website ?? null;
+  if (raw != null && typeof raw === "string" && raw.trim()) {
+    const trimmed = raw.trim();
+    return trimmed.startsWith("http") ? trimmed : `https://${trimmed.replace(/^\/\//, "")}`;
+  }
+  if (row.domain) return `https://${row.domain}`;
+  return null;
+}
 
 function buildCandidateFromRow(row) {
   let data = {};
@@ -31,12 +60,9 @@ function buildCandidateFromRow(row) {
   } catch {
     /* ignore */
   }
-  const website =
-    row.website ||
-    data.website ||
-    (row.domain ? `https://${row.domain}` : null);
+  const website = coerceWebsite(row, data);
   return {
-    name: row.name || data.name || row.domain,
+    name: row.name || data.name || row.domain || "Unknown",
     website,
     domain: row.domain,
     sourceTag: data.sourceTag || "backfill",
@@ -49,6 +75,18 @@ function buildCandidateFromRow(row) {
   };
 }
 
+function buildPersistPayload(scored, row) {
+  const canonicalDomain = row.domain || scored.domain;
+  return {
+    ...scored,
+    domain: canonicalDomain,
+    sources: [
+      ...(scored.openCorporates?.ocUrl ? [scored.openCorporates.ocUrl] : []),
+      scored.website,
+    ].filter(Boolean),
+  };
+}
+
 /**
  * @param {object} row
  * @param {object} brief
@@ -56,6 +94,10 @@ function buildCandidateFromRow(row) {
  * @param {object} fetchOpts
  */
 export async function processBackfillRow(row, brief, env, fetchOpts) {
+  if (!row?.id) {
+    throw new Error("Invalid company row");
+  }
+
   const candidate = buildCandidateFromRow(row);
   if (!candidate.website && !candidate.domain) {
     setRejected(row.id, true);
@@ -89,27 +131,29 @@ export async function processBackfillRow(row, brief, env, fetchOpts) {
     manual_proprietary: row.manual_proprietary,
   });
 
-  const payload = {
-    ...scored,
-    sources: [
-      ...(scored.openCorporates?.ocUrl ? [scored.openCorporates.ocUrl] : []),
-      scored.website,
-    ].filter(Boolean),
-  };
+  const payload = buildPersistPayload(scored, row);
+  const upsertDomain = row.domain || normalizeDomain(payload.website || "");
+  if (!upsertDomain) {
+    setRejected(row.id, true);
+    return { outcome: "removed", reason: "no domain after enrich" };
+  }
+  payload.domain = upsertDomain;
 
-  const savedRow = upsertCompany({
-    domain: scored.domain,
+  const savedRow = updateCompanyById(row.id, {
     name: scored.name,
     website: scored.website,
     data: payload,
-    isSaved: !!row.is_saved,
   });
+  if (!savedRow) {
+    setRejected(row.id, true);
+    return { outcome: "removed", reason: "row missing on save" };
+  }
 
   return {
     outcome: "enriched",
     company: rowToCompany(savedRow),
     score: thesisPts,
-    domain: scored.domain,
+    domain: upsertDomain,
     name: scored.name,
   };
 }
@@ -129,8 +173,7 @@ export async function runBackfillEnrich(jobId, config, env, emit) {
     activeProduct: config?.selectedProducts?.[0] || null,
   };
 
-  const rows = [...iterateBackfillCandidates()];
-  const total = rows.length;
+  const total = countBackfillCandidates();
 
   const stats = {
     total,
@@ -143,10 +186,10 @@ export async function runBackfillEnrich(jobId, config, env, emit) {
   const jobState = { stopped: false };
   activeJobs.set(jobId, jobState);
 
-  emit({ type: "backfill:started", jobId, ...stats });
+  safeEmit(emit, { type: "backfill:started", jobId, ...stats });
 
   if (total === 0) {
-    emit({ type: "backfill:done", jobId, ...stats, stopped: false });
+    safeEmit(emit, { type: "backfill:done", jobId, ...stats, stopped: false });
     activeJobs.delete(jobId);
     return stats;
   }
@@ -157,57 +200,64 @@ export async function runBackfillEnrich(jobId, config, env, emit) {
   const queue = new PQueue({ concurrency });
 
   try {
-    await Promise.all(
-      rows.map((row) =>
-        queue.add(async () => {
-          if (jobState.stopped) return;
+    for (const row of iterateBackfillCandidates()) {
+      if (jobState.stopped) break;
 
-          const label = row.name || row.domain || String(row.id);
-          try {
-            const result = await processBackfillRow(row, brief, env, fetchOpts);
-            stats.scanned += 1;
-            if (result.outcome === "enriched") {
-              stats.enriched += 1;
-              emit({
-                type: "backfill:log",
-                message: `Enriched (${result.score}): ${label}`,
-              });
-              emit({
-                type: "backfill:company",
-                company: result.company,
-              });
-            } else {
-              stats.removed += 1;
-              emit({
-                type: "backfill:log",
-                message: `Removed (${result.reason}): ${label}`,
-              });
-            }
-          } catch (e) {
-            stats.scanned += 1;
-            stats.failed += 1;
-            emit({
+      await queue.add(async () => {
+        if (jobState.stopped) return;
+
+        const label = row.name || row.domain || String(row.id);
+        try {
+          const result = await withTaskTimeout(() =>
+            processBackfillRow(row, brief, env, fetchOpts),
+          );
+          stats.scanned += 1;
+          if (result.outcome === "enriched") {
+            stats.enriched += 1;
+            safeEmit(emit, {
               type: "backfill:log",
-              message: `Failed: ${label} — ${e.message}`,
+              message: `Enriched (${result.score}): ${label}`,
+            });
+            safeEmit(emit, {
+              type: "backfill:company",
+              id: row.id,
+              domain: result.domain,
+              name: result.name,
+              score: result.score,
+            });
+          } else {
+            stats.removed += 1;
+            safeEmit(emit, {
+              type: "backfill:log",
+              message: `Removed (${result.reason}): ${label}`,
             });
           }
-
-          emit({
-            type: "backfill:progress",
-            jobId,
-            ...stats,
-            processed: stats.scanned,
+        } catch (e) {
+          stats.scanned += 1;
+          stats.failed += 1;
+          safeEmit(emit, {
+            type: "backfill:log",
+            message: `Failed: ${label} — ${e.message || String(e)}`,
           });
-        }),
-      ),
-    );
+        }
+
+        safeEmit(emit, {
+          type: "backfill:progress",
+          jobId,
+          ...stats,
+          processed: stats.scanned,
+        });
+      });
+    }
+
+    await queue.onIdle();
   } finally {
     fetchCache.clear();
     resetFetchCacheAccounting(fetchCache);
     activeJobs.delete(jobId);
   }
 
-  emit({
+  safeEmit(emit, {
     type: "backfill:done",
     jobId,
     ...stats,

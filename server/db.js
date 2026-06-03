@@ -185,6 +185,43 @@ export function getCompanyById(id) {
   return getDb().prepare("SELECT * FROM companies WHERE id = ?").get(id);
 }
 
+/** Update enrichment payload for an existing row by primary key (backfill-safe). */
+export function updateCompanyById(id, { name, website, data }) {
+  const d = getDb();
+  const row = d.prepare("SELECT * FROM companies WHERE id = ?").get(id);
+  if (!row) return null;
+  let payload;
+  try {
+    payload = JSON.stringify(data ?? {});
+  } catch (e) {
+    throw new Error(`Company data not serializable: ${e.message}`);
+  }
+  let keepRejected = row.is_rejected ? 1 : 0;
+  if (keepRejected === 0) {
+    try {
+      const existing = JSON.parse(row.data || "{}");
+      if (isPublicExclusionData(existing) || isPublicExclusionData(data)) keepRejected = 1;
+    } catch {
+      if (isPublicExclusionData(data)) keepRejected = 1;
+    }
+  }
+  let exclusionReason = null;
+  if (keepRejected === 1) {
+    exclusionReason = data?.exclusionReason ?? null;
+    if (exclusionReason == null) {
+      try {
+        exclusionReason = JSON.parse(row.data || "{}").exclusionReason ?? null;
+      } catch {
+        exclusionReason = null;
+      }
+    }
+  }
+  d.prepare(
+    `UPDATE companies SET name = ?, website = ?, data = ?, is_rejected = ?, exclusion_reason = ?, updated_at = datetime('now') WHERE id = ?`
+  ).run(name ?? null, website ?? null, payload, keepRejected, exclusionReason, id);
+  return d.prepare("SELECT * FROM companies WHERE id = ?").get(id);
+}
+
 export function getCompanyByDomain(domain) {
   return getDb().prepare("SELECT * FROM companies WHERE domain = ?").get(domain);
 }

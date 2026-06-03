@@ -529,7 +529,11 @@ app.post("/api/universe/backfill", (req, res) => {
           const job = backfillJobs.get(jobId);
           if (job) job.status = "error";
         }
-      })();
+      })().catch((e) => {
+        console.error("[backfill] unhandled job error:", e);
+        const job = backfillJobs.get(jobId);
+        if (job) job.status = "error";
+      });
     }, 0);
   } catch (e) {
     res.status(500).json({ ok: false, message: e.message || String(e) });
@@ -548,7 +552,11 @@ app.get("/api/universe/backfill/:jobId/stream", (req, res) => {
   res.flushHeaders?.();
 
   const send = (evt) => {
-    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+    try {
+      res.write(`data: ${JSON.stringify(evt)}\n\n`);
+    } catch {
+      /* ignore oversized or non-serializable SSE payloads */
+    }
   };
 
   const listener = (evt) => send(evt);
