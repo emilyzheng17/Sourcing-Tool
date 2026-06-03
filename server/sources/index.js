@@ -17,6 +17,8 @@ import { searchSaaSHub } from "./saashub.js";
 import { searchAlternativeTo } from "./alternativeTo.js";
 import { searchMarketplacePages } from "./marketplacePages.js";
 import { searchTavily } from "./tavily.js";
+import { searchSearxng } from "./searxng.js";
+import { searchDuckDuckGo } from "./duckduckgo.js";
 import { searchHighRiskSources } from "./highRisk/index.js";
 
 /** Directory listing scrapers — keyed by product slug, not vertical; safe to skip on repeat passes. */
@@ -61,6 +63,8 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
     settle("assoc", searchTradeAssocs(brief, fo)),
     settle("brave", searchBrave(brief, env)),
     settle("serper", searchSerper(brief, env)),
+    settle("searxng", searchSearxng(brief, env)),
+    settle("duckduckgo", searchDuckDuckGo(brief, env)),
     settle("exa", searchExa(brief, env)),
     settle("apollo", searchApollo(brief, env, fo)),
     settle("crunchbase", searchCrunchbase(brief, env, fo)),
@@ -103,6 +107,8 @@ export async function fanOutSources(brief, env, fetchOpts) {
     getapp: [],
     brave: [],
     serper: [],
+    searxng: [],
+    duckduckgo: [],
     exa: [],
     apollo: [],
     crunchbase: [],

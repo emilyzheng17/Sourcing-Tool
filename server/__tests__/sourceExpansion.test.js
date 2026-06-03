@@ -12,6 +12,11 @@ import { extractMarketplaceLinks } from "../sources/marketplacePages.js";
 import { pathsForProduct, SOFTWARE_ADVICE_PATHS } from "../lib/productCategoryPaths.js";
 import { testParseSerperResults } from "../sources/serper.js";
 import { testParseExaResults } from "../sources/exa.js";
+import { testParseSearxResults } from "../sources/searxng.js";
+import {
+  testParseDuckDuckGoHtml,
+  decodeDuckDuckGoHref,
+} from "../sources/duckduckgo.js";
 
 test("PE firm seed list includes planned expansion firms", () => {
   const ids = new Set(PE_FIRMS.map((f) => f.id));
@@ -107,6 +112,42 @@ test("Serper parser extracts organic result links", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].website, "https://www.acmefleet.com/");
   assert.equal(rows[0].sourceTag, "Serper");
+});
+
+test("SearxNG parser extracts result links and filters junk domains", () => {
+  const data = {
+    results: [
+      {
+        url: "https://www.acmefleet.com/",
+        title: "Acme Fleet Software",
+        content: "Fleet management SaaS.",
+      },
+      { url: "https://www.google.com/", title: "Google", content: "Search engine." },
+    ],
+  };
+  const rows = testParseSearxResults(data, "fleet software");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].website, "https://www.acmefleet.com/");
+  assert.equal(rows[0].sourceTag, "SearxNG");
+  assert.equal(rows[0].rawMetadata.query, "fleet software");
+});
+
+test("decodeDuckDuckGoHref decodes uddg redirect links", () => {
+  const href = "/l/?uddg=https%3A%2F%2Fwww.acmefleet.com%2F&rut=abc";
+  assert.equal(decodeDuckDuckGoHref(href), "https://www.acmefleet.com/");
+  assert.equal(decodeDuckDuckGoHref("https://vendor.example.com/"), "https://vendor.example.com/");
+});
+
+test("DuckDuckGo HTML parser extracts result links", () => {
+  const html = `
+    <a class="result__a" href="/l/?uddg=https%3A%2F%2Fwww.acmefleet.com%2F">Acme Fleet Software</a>
+    <a class="result__a" href="/l/?uddg=https%3A%2F%2Fwww.google.com%2F">Google</a>
+  `;
+  const rows = testParseDuckDuckGoHtml(html, "fleet vendors");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].website, "https://www.acmefleet.com/");
+  assert.equal(rows[0].sourceTag, "DuckDuckGo");
+  assert.equal(rows[0].rawMetadata.query, "fleet vendors");
 });
 
 test("testParseExaResults maps Exa API results to discovery candidates", () => {
