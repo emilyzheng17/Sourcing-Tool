@@ -1,0 +1,43 @@
+# Minimal SearXNG config for the sourcing-tool.
+# Required: search.formats must include "json" so server/sources/searxng.js
+# can request format=json.
+
+use_default_settings: true
+
+general:
+  instance_name: "sourcing-tool"
+
+server:
+  secret_key: "change-me-local-only"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+# Keep the keyless engines that respond well to scripted JSON queries.
+# Disable engines that frequently rate-limit a self-hosted instance.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: wikipedia
+    disabled: false
