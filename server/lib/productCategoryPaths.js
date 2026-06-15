@@ -98,6 +98,44 @@ export const ALTERNATIVETO_PATHS = {
   "Business Intelligence & Reporting": ["business-intelligence"],
 };
 
+/** @type {Record<string, string | string[]>} SaaSworthy /list/<slug> category pages. */
+export const SAASWORTHY_PATHS = {
+  "ERP & Operations": ["erp-software", "inventory-management-software"],
+  "Fleet & Asset Management": ["fleet-management-software", "asset-tracking-software"],
+  "Safety & Compliance Management": ["compliance-management-software", "ehs-software"],
+  "Field Service Management": ["field-service-management-software"],
+  "Estimating & Bidding": ["construction-estimating-software"],
+  "Supply Chain & Inventory": ["supply-chain-management-software", "inventory-management-software"],
+  "Dispatch & Logistics": ["logistics-software", "transportation-management-software"],
+  "Environmental & Waste Management": ["waste-management-software"],
+  "Structural & Engineering Design": ["cad-software"],
+  "Project Management": ["project-management-software", "construction-management-software"],
+  "Maintenance Management (CMMS)": ["cmms-software"],
+  "Weighbridge & Ticketing": ["erp-software"],
+  "CRM & Sales": ["crm-software"],
+  "HR & Workforce Management": ["hr-software", "payroll-software"],
+  "Business Intelligence & Reporting": ["business-intelligence-software"],
+};
+
+/** @type {Record<string, string | string[]>} Crozdesk category pages (links out to /software/<slug> profiles). */
+export const CROZDESK_PATHS = {
+  "ERP & Operations": ["enterprise-resource-planning-erp-software", "operations-management"],
+  "Fleet & Asset Management": ["fleet-management-software", "asset-management-software"],
+  "Safety & Compliance Management": ["compliance-software", "health-safety-software"],
+  "Field Service Management": ["field-service-management-software"],
+  "Estimating & Bidding": ["construction-management-software"],
+  "Supply Chain & Inventory": ["supply-chain-management-software", "inventory-management-software"],
+  "Dispatch & Logistics": ["logistics-software", "transport-management-software"],
+  "Environmental & Waste Management": ["waste-management-software"],
+  "Structural & Engineering Design": ["cad-software"],
+  "Project Management": ["project-management-software"],
+  "Maintenance Management (CMMS)": ["maintenance-management-software"],
+  "Weighbridge & Ticketing": ["enterprise-resource-planning-erp-software"],
+  "CRM & Sales": ["crm-software"],
+  "HR & Workforce Management": ["hr-software", "payroll-software"],
+  "Business Intelligence & Reporting": ["business-intelligence-software"],
+};
+
 /**
  * @param {Record<string, string | string[]>} map
  * @param {string} [activeProduct]

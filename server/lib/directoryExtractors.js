@@ -204,6 +204,74 @@ export function extractSaaSHubListings(html, pathLabel) {
 }
 
 /** @param {string} html @param {string} pathLabel */
+export function extractSaaSworthyListings(html, pathLabel) {
+  const $ = cheerio.load(html);
+  const seen = new Set();
+  const rows = [];
+  $('a[href*="/product/"]').each((_, el) => {
+    const href = $(el).attr("href");
+    if (!href) return;
+    let abs;
+    try {
+      abs = new URL(href, "https://www.saasworthy.com").href;
+    } catch {
+      return;
+    }
+    if (!abs.includes("saasworthy.com/product/")) return;
+    const clean = abs.split("?")[0].split("#")[0];
+    const slug = clean.split("/product/")[1]?.replace(/\/$/, "");
+    if (!slug || slug.includes("/")) return;
+    const key = slug.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const name =
+      $(el).text().trim().split("\n")[0].trim() || slug.replace(/-/g, " ");
+    if (!isLikelyB2BSoftwareName(name)) return;
+    rows.push({
+      name: name.slice(0, 120),
+      website: clean,
+      sourceTag: "SaaSworthy",
+      rawMetadata: { saasworthyUrl: clean, category: pathLabel },
+    });
+  });
+  return rows;
+}
+
+/** @param {string} html @param {string} pathLabel */
+export function extractCrozdeskListings(html, pathLabel) {
+  const $ = cheerio.load(html);
+  const seen = new Set();
+  const rows = [];
+  $('a[href*="/software/"]').each((_, el) => {
+    const href = $(el).attr("href");
+    if (!href || href.includes("/reviews")) return;
+    let abs;
+    try {
+      abs = new URL(href, "https://crozdesk.com").href;
+    } catch {
+      return;
+    }
+    if (!abs.includes("crozdesk.com/software/")) return;
+    const clean = abs.split("?")[0].split("#")[0];
+    const slug = clean.split("/software/")[1]?.replace(/\/$/, "");
+    if (!slug || slug.includes("/")) return;
+    const key = slug.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const name =
+      $(el).text().trim().split("\n")[0].trim() || slug.replace(/-/g, " ");
+    if (!isLikelyB2BSoftwareName(name)) return;
+    rows.push({
+      name: name.slice(0, 120),
+      website: clean,
+      sourceTag: "Crozdesk",
+      rawMetadata: { crozdeskUrl: clean, category: pathLabel },
+    });
+  });
+  return rows;
+}
+
+/** @param {string} html @param {string} pathLabel */
 export function extractAlternativeToListings(html, pathLabel) {
   const $ = cheerio.load(html);
   const seen = new Set();

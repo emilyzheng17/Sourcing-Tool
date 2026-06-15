@@ -1,5 +1,6 @@
 import { PE_FIRMS } from "./peFirms.data.js";
 import { breadthMultiplier } from "../lib/breadth.js";
+import { rotateSeeds } from "../lib/seedRotation.js";
 import { harvestPortfolioEntryList } from "./portfolioHarvest.js";
 
 /**
@@ -10,7 +11,7 @@ import { harvestPortfolioEntryList } from "./portfolioHarvest.js";
 export async function searchPePortfolios(brief = {}, fetchOpts = {}) {
   const m = breadthMultiplier(brief);
   const limit = Math.min(PE_FIRMS.length, Math.min(80, 20 * m));
-  const entries = PE_FIRMS.slice(0, limit).map((f) => ({
+  const entries = rotateSeeds(PE_FIRMS, brief).slice(0, limit).map((f) => ({
     portfolioUrl: f.portfolioUrl,
     name: f.name,
   }));

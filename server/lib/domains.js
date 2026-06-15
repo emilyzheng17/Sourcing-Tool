@@ -23,6 +23,7 @@ export const DIRECTORY_LISTING_HOST_MARKERS = [
   "saashub.com",
   "alternativeto.net",
   "crozdesk.com",
+  "saasworthy.com",
   "financesonline.com",
 ];
 
@@ -55,6 +56,7 @@ export function isLikelyCompanyDomain(domain) {
     "alternativeto.net",
     "trustradius.com",
     "crozdesk.com",
+    "saasworthy.com",
     "financesonline.com",
     "producthunt.com",
     "stackshare.io",

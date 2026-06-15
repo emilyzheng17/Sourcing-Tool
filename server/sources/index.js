@@ -15,10 +15,18 @@ import { searchSourceForge } from "./sourceforge.js";
 import { searchSlashdot } from "./slashdot.js";
 import { searchSaaSHub } from "./saashub.js";
 import { searchAlternativeTo } from "./alternativeTo.js";
+import { searchCrozdesk } from "./crozdesk.js";
+import { searchSaaSworthy } from "./saasworthy.js";
 import { searchMarketplacePages } from "./marketplacePages.js";
 import { searchTavily } from "./tavily.js";
 import { searchSearxng } from "./searxng.js";
 import { searchDuckDuckGo } from "./duckduckgo.js";
+import { searchWikidata } from "./wikidata.js";
+import { searchYCombinator } from "./ycombinator.js";
+import { searchGithub } from "./github.js";
+import { searchWordpress } from "./wordpress.js";
+import { searchListicles } from "./listicles.js";
+import { searchFrontier } from "./frontier.js";
 import { searchHighRiskSources } from "./highRisk/index.js";
 
 /** Hard cap so one adapter cannot block discovery fan-out indefinitely. */
@@ -35,6 +43,8 @@ export const DIRECTORY_SOURCE_KEYS = new Set([
   "slashdot",
   "saashub",
   "alternativeto",
+  "crozdesk",
+  "saasworthy",
 ]);
 
 /**
@@ -76,6 +86,12 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
     settle("serper", searchSerper(brief, env)),
     settle("searxng", searchSearxng(brief, env)),
     settle("duckduckgo", searchDuckDuckGo(brief, env)),
+    settle("wikidata", searchWikidata(brief, env)),
+    settle("ycombinator", searchYCombinator(brief, env)),
+    settle("github", searchGithub(brief, env)),
+    settle("wordpress", searchWordpress(brief, env)),
+    settle("listicles", searchListicles(brief, env, fo)),
+    settle("frontier", searchFrontier(brief, env, fo)),
     settle("exa", searchExa(brief, env)),
     settle("apollo", searchApollo(brief, env, fo)),
     settle("crunchbase", searchCrunchbase(brief, env, fo)),
@@ -95,6 +111,8 @@ export async function fanOutSourcesIncremental(brief, env, fetchOpts, onSourceRe
       settle("slashdot", searchSlashdot(brief, fo)),
       settle("saashub", searchSaaSHub(brief, fo)),
       settle("alternativeto", searchAlternativeTo(brief, fo)),
+      settle("crozdesk", searchCrozdesk(brief, fo)),
+      settle("saasworthy", searchSaaSworthy(brief, fo)),
     );
   }
 
@@ -120,6 +138,12 @@ export async function fanOutSources(brief, env, fetchOpts) {
     serper: [],
     searxng: [],
     duckduckgo: [],
+    wikidata: [],
+    ycombinator: [],
+    github: [],
+    wordpress: [],
+    listicles: [],
+    frontier: [],
     exa: [],
     apollo: [],
     crunchbase: [],
@@ -129,6 +153,8 @@ export async function fanOutSources(brief, env, fetchOpts) {
     slashdot: [],
     saashub: [],
     alternativeto: [],
+    crozdesk: [],
+    saasworthy: [],
     marketplace: [],
     tavily: [],
     highRisk: [],

@@ -26,6 +26,13 @@ export function buildSearchQueries(brief) {
     queries.push(`${v} ${productSlug} B2B SaaS vendors`);
     queries.push(`industrial ${v} ${productSlug} platform`);
     queries.push(`${productSlug} software for ${v} industry`);
+    // Listicle / directory / association patterns surface long-tail niche vendors
+    // that the generic templates keep missing run-over-run.
+    queries.push(`best ${v} ${productSlug} software`);
+    queries.push(`top ${v} ${productSlug} software companies`);
+    queries.push(`${v} ${productSlug} software comparison alternatives`);
+    queries.push(`${v} association directory software vendors`);
+    queries.push(`niche ${v} ${productSlug} software "request a demo"`);
   }
 
   if (tags) {

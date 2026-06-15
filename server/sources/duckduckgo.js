@@ -43,6 +43,10 @@ export function decodeDuckDuckGoHref(href) {
  * @param {NodeJS.ProcessEnv} _env
  */
 export async function searchDuckDuckGo(brief, _env) {
+  const env = _env || process.env;
+  const enabled = /^(1|true|yes)$/i.test(String(env.ENABLE_DUCKDUCKGO || "").trim());
+  if (!enabled) return [];
+
   const m = breadthMultiplier(brief);
   const maxQueries = Math.min(12, 6 * m);
   const maxResults = Math.min(200, 80 * m);
